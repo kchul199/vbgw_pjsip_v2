@@ -47,15 +47,36 @@ public:
     virtual void onCallTransferStatus(pj::OnCallTransferStatusParam& prm) override;
     virtual void onCallReplaceRequest(pj::OnCallReplaceRequestParam& prm) override;
     virtual void onCallReplaced(pj::OnCallReplacedParam& prm) override;
-    virtual pjsip_redirect_op onCallRedirected(pj::OnCallRedirectedParam& prm) override;
+    pjsip_redirect_op onCallRedirected(pj::OnCallRedirectedParam& prm) override;
+
+    // [Phase 0] 라우팅 정보 설정
+    void setRoutingInfo(const std::string& service_name, const std::string& entry_number, const std::string& route_type) {
+        service_name_ = service_name;
+        entry_number_ = entry_number;
+        route_type_ = route_type;
+    }
+
+    void setSlotId(const std::string& slot_id) {
+        slot_id_ = slot_id;
+    }
+
+    std::string getServiceName() const { return service_name_; }
+    std::string getEntryNumber() const { return entry_number_; }
+    std::string getRouteType() const { return route_type_; }
+    std::string getSlotId() const { return slot_id_; }
+    std::string getSessionId() const { return session_id_; }
 
     // [R-3 Fix] Graceful Shutdown 시 AI 세션 명시적 종료
+
     void endAiSession();
 
     // API 제어 기능
     bool sendDtmfToPeer(const std::string& digits, std::string* error_message = nullptr);
     bool sendDtmfToAi(const std::string& digits, std::string* error_message = nullptr);
+    
+    // [Step 4] 호전환 및 안내 멘트
     bool transferTo(const std::string& target_uri, std::string* error_message = nullptr);
+    bool playAnnouncement(const std::string& file_path, std::string* error_message = nullptr);
     bool startRecording(const std::string& file_path, std::string* error_message = nullptr);
     bool stopRecording(std::string* error_message = nullptr);
     bool isRecording() const;
@@ -82,13 +103,43 @@ private:
     // [M-9 Fix] UUID 기반 세션 ID — 분산 환경에서 로그 추적 가능
     std::string session_id_;
 
+    // [Phase 0] 라우팅 정보
+    std::string service_name_;
+    std::string entry_number_;
+    std::string route_type_;
+
+    // [Phase 2] Slot 정보
+    std::string slot_id_;
+
+    // [Phase 4] 세션 상태
+    enum class CallState {
+        ACTIVE,
+        QUEUED,
+        OVERFLOWED,
+        TRANSFERRING
+    };
+    CallState state_ = CallState::ACTIVE;
+
     // [E-1] CDR (Call Detail Record) 생성을 위한 생애주기 메트릭
     std::chrono::system_clock::time_point start_time_;
     std::atomic<int> vad_trigger_count_{0};
     std::atomic<int> bargein_count_{0};
+    std::atomic<int> turn_count_{0}; // [Step 5] Turn Capping용
 
     static bool isValidDtmfDigits(const std::string& digits);
     static bool isValidTransferTarget(const std::string& target_uri);
     bool startRecordingLocked(const std::string& file_path, std::string* error_message);
     void dumpCdr(const std::string& reason);
+
+    // [Step 3] Redis Lease Heartbeat
+    void startLeaseHeartbeat();
+    void stopLeaseHeartbeat();
+
+private:
+    void onLeaseHeartbeat(pj::TimerEvent& event);
+    pj_timer_entry lease_timer_;
+
+    // [Step 5] AI Cushion Timer
+    void onCushionTimeout(pj::TimerEvent& event);
+    pj_timer_entry cushion_timer_;
 };

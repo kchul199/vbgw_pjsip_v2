@@ -1,0 +1,56 @@
+version: 2
+
+defaults:
+  on_unknown_entry: static_fallback
+
+services:
+  - name: bot-main
+    enabled: true
+    route_type: ai
+    priority: 100
+    entry_numbers: ["1000", "5551212"]
+    match:
+      ingress_stages: ["default-policy"]
+      source_gateways: ["pbx-main", "pbx-standby"]
+    capacity:
+      backend: logical
+      max_concurrent: 10
+      allocator: round_robin
+      overflow:
+        policy: queue
+        max_wait_seconds: 20
+        announcement: "ivr/queue-wait.wav"
+        on_timeout: busy
+
+  - name: vip-bot
+    enabled: true
+    route_type: ai
+    priority: 200
+    entry_numbers: ["2000"]
+    match:
+      ingress_stages: ["default-policy"]
+      source_gateways: ["pbx-main", "pbx-standby"]
+    capacity:
+      backend: logical
+      max_concurrent: 2
+      allocator: round_robin
+      overflow:
+        policy: fallback_to_human
+        target: "sip:agent@pbx-main"
+        announce_before_transfer: true
+
+  - name: frontdesk-bot
+    enabled: true
+    route_type: ai
+    priority: 50
+    entry_numbers: ["3000"]
+    match:
+      ingress_stages: ["default-policy"]
+      source_gateways: ["pbx-main"]
+    capacity:
+      backend: sip_extension
+      allocator: round_robin
+      extensions: ["1001", "1002", "1003"]
+      require_registered: true
+      overflow:
+        policy: busy

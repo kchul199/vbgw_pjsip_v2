@@ -11,12 +11,25 @@ find_package(PkgConfig REQUIRED)
 # PJSIP 찾기
 pkg_check_modules(PJPROJECT REQUIRED libpjproject)
 
-# Boost, gRPC, Protobuf, OpenSSL 찾기
+# ── Unified OpenSSL Enforcement ──
+# 모든 라이브러리가 동일한 시스템 OpenSSL을 사용하도록 강제하여 gRPC(BoringSSL)와의 충돌 방지
+find_package(OpenSSL REQUIRED)
+message(STATUS "Unified OpenSSL found: ${OPENSSL_VERSION} at ${OPENSSL_INCLUDE_DIR}")
+
+# CURL 탐색 (OpenSSL 백엔드 권장)
+find_package(CURL REQUIRED)
+message(STATUS "CURL found: ${CURL_VERSION_STRING} at ${CURL_LIBRARIES}")
+
+# Boost, gRPC, Protobuf 찾기
 find_package(Boost REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
-find_package(OpenSSL REQUIRED)
+
+# uuid 찾기 (Linux/macOS 기본 라이브러리)
+pkg_check_modules(UUID REQUIRED uuid)
+
 find_library(ONNXRUNTIME_LIB 
+ 
     NAMES onnxruntime 
     PATHS /opt/homebrew/lib /usr/local/lib /usr/lib /opt/onnxruntime/lib
     REQUIRED)
@@ -62,11 +75,15 @@ add_library(vbgw_lib STATIC
     src/engine/VoicebotAccount.cpp
     src/engine/VoicebotCall.cpp
     src/engine/VoicebotMediaPort.cpp
+    src/engine/RoutingEngine.cpp
+    src/engine/CapacityManager.cpp
+    src/engine/AccountManager.cpp
     src/ai/VoicebotAiClient.cpp
     src/ai/SileroVad.cpp
     src/ai/SpeexDsp.cpp
     src/ivr/IvrManager.cpp
     src/api/HttpServer.cpp
+    src/utils/CdrWebhookClient.cpp
     ${PROTO_SRCS}
 )
 
@@ -76,9 +93,11 @@ target_link_libraries(vbgw PRIVATE vbgw_lib)
 # 3. 헤더 디렉토리 포함
 target_include_directories(vbgw_lib PUBLIC 
     ${PJPROJECT_INCLUDE_DIRS}
+    ${UUID_INCLUDE_DIRS}
     src
     ${PROTO_GEN_DIR}
     ${ONNXRUNTIME_INCLUDE_DIR}
+    ${SPEEXDSP_INCLUDE_DIR}
 )
 
 # OpenSSL 라이브러리 경로 추출 (macOS 등 비표준 경로 대비)
@@ -96,11 +115,16 @@ set_target_properties(vbgw PROPERTIES LINK_FLAGS "${PJ_RAW_LDFLAGS}")
 
 target_link_libraries(vbgw_lib PUBLIC 
     ${PJPROJECT_LIBRARIES}
+    ${UUID_LIBRARIES}
     Boost::headers
     gRPC::grpc++
     protobuf::libprotobuf
     OpenSSL::SSL
     OpenSSL::Crypto
+    CURL::libcurl
+    redis++_static
+    hiredis
+    hiredis_ssl
     ${ONNXRUNTIME_LIB}
     ${SPEEXDSP_LIB}
     spdlog::spdlog
@@ -115,7 +139,52 @@ FetchContent_Declare(
   URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
 )
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+
+FetchContent_Declare(
+  yaml-cpp
+  URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/0.8.0.zip
+)
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+
+# hiredis (SSL 지원 활성)
+FetchContent_Declare(
+  hiredis
+  URL https://github.com/redis/hiredis/archive/refs/tags/v1.2.0.zip
+)
+set(ENABLE_SSL ON CACHE BOOL "" FORCE)
+set(HIREDIS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(HIREDIS_MASTER_STATIC ON CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(hiredis)
+FetchContent_GetProperties(hiredis)
+
+# redis-plus-plus가 #include <hiredis/hiredis.h>를 강하게 원함.
+# hiredis 소스 루트에 hiredis/ 서브디렉토리가 없으므로 프록시를 만듦.
+set(HIREDIS_PROXY_DIR ${CMAKE_BINARY_DIR}/hiredis_proxy)
+file(MAKE_DIRECTORY ${HIREDIS_PROXY_DIR}/hiredis)
+file(GLOB HIREDIS_HEADERS "${hiredis_SOURCE_DIR}/*.h")
+foreach(header ${HIREDIS_HEADERS})
+    get_filename_component(header_name ${header} NAME)
+    configure_file(${header} ${HIREDIS_PROXY_DIR}/hiredis/${header_name} COPYONLY)
+endforeach()
+
+# redis-plus-plus (SSL 지원 활성)
+FetchContent_Declare(
+  redis-plus-plus
+  URL https://github.com/sewenew/redis-plus-plus/archive/refs/tags/1.3.10.zip
+)
+set(REDIS_PLUS_PLUS_USE_TLS ON CACHE BOOL "" FORCE)
+set(REDIS_PLUS_PLUS_BUILD_TEST OFF CACHE BOOL "" FORCE)
+set(REDIS_PLUS_PLUS_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+
+# HINT 제공 (가장 중요)
+set(HIREDIS_HEADER ${HIREDIS_PROXY_DIR} CACHE PATH "Hiredis proxy path" FORCE)
+# 전체 빌드에 프록시 경로 주입
+include_directories(${HIREDIS_PROXY_DIR})
+
+FetchContent_MakeAvailable(googletest yaml-cpp redis-plus-plus)
 
 enable_testing()
 add_executable(test_vbgw
@@ -124,4 +193,13 @@ add_executable(test_vbgw
 )
 target_link_libraries(test_vbgw PRIVATE vbgw_lib GTest::gtest_main)
 include(GoogleTest)
-gtest_discover_tests(test_vbgw)
+gtest_discover_tests(test_vbgw DISCOVERY_TIMEOUT 30)
+
+add_executable(verify_webhook tests/verify_webhook.cpp)
+target_link_libraries(verify_webhook PRIVATE vbgw_lib)
+
+add_executable(verify_redis tests/verify_redis.cpp)
+target_link_libraries(verify_redis PRIVATE vbgw_lib)
+
+# 6. yaml-cpp 링크 추가
+target_link_libraries(vbgw_lib PUBLIC yaml-cpp)

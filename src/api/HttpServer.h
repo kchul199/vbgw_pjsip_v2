@@ -53,6 +53,8 @@ private:
     std::string handleLiveness() const;
     std::string handleReadiness() const;
     std::string handleMetrics() const;
+    std::string handleListServices(const std::string& admin_key, const std::string& remote_ip) const;
+    std::string handleListSessions(const std::string& admin_key, const std::string& remote_ip) const;
     std::string handleOutboundCall(const std::string& json_body, const std::string& admin_key,
                                    const std::string& remote_ip) const;
     std::string handleCallDtmf(int call_id, const std::string& json_body,

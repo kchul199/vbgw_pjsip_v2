@@ -1,0 +1,111 @@
+#include "CapacityManager.h"
+#include <spdlog/spdlog.h>
+#include <uuid/uuid.h> // 고유 slot_id 생성을 위해 uuid 사용 (시스템 라이브러리)
+
+// Lua Script: Max Concurrent 체크 후 슬롯 할당 및 TTL 설정
+// KEYS[1]: vbgw:slots:{service_name} (SET)
+// KEYS[2]: vbgw:lease:{slot_id} (STRING)
+// ARGV[1]: slot_id
+// ARGV[2]: max_concurrent
+// ARGV[3]: ttl_seconds
+const std::string LEASE_LUA = R"(
+    local count = redis.call('SCARD', KEYS[1])
+    local max_cap = tonumber(ARGV[2])
+    if max_cap > 0 and count >= max_cap then
+        return 0
+    end
+    redis.call('SADD', KEYS[1], ARGV[1])
+    redis.call('SETEX', KEYS[2], ARGV[3], ARGV[1])
+    return 1
+)";
+
+bool CapacityManager::init(const std::string& redis_addr) {
+    try {
+        sw::redis::ConnectionOptions opts;
+        // 간단한 파싱: tcp://127.0.0.1:6379 -> host/port 추출
+        // 실제로는 정교한 파싱이 필요하지만 우선 redis-plus-plus의 URI 지원 활용
+        redis_ = std::make_unique<sw::redis::Redis>(redis_addr);
+        
+        // 연결 테스트
+        redis_->ping();
+        
+        spdlog::info("[CapacityManager] Connected to Redis at {}", redis_addr);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("[CapacityManager] Failed to connect to Redis: {}", e.what());
+        return false;
+    }
+}
+
+SlotLease CapacityManager::leaseSlot(const std::string& service_name, int max_concurrent) {
+    if (!redis_) {
+        // Redis 미연결 시 로컬 폴백 (Phase 2 로직 유지)
+        spdlog::warn("[CapacityManager] Redis not connected. Fallback to fail-open or reject.");
+        return {false, ""}; 
+    }
+
+    // UUID 생성
+    uuid_t uuid;
+    uuid_generate(uuid);
+    char uuid_str[37];
+    uuid_unparse_lower(uuid, uuid_str);
+    std::string slot_id = uuid_str;
+
+    std::string slots_key = "vbgw:slots:" + service_name;
+    std::string lease_key = "vbgw:lease:" + slot_id;
+
+    try {
+        auto result = redis_->command<long long>(
+            "EVAL", LEASE_LUA, 2, slots_key.c_str(), lease_key.c_str(),
+            slot_id.c_str(), std::to_string(max_concurrent).c_str(), "30");
+
+        if (result == 1) {
+            spdlog::info("[CapacityManager] Leased slot {} for service {}", slot_id, service_name);
+            return {true, slot_id};
+        } else {
+            spdlog::warn("[CapacityManager] Overflow for service {}. Max: {}", service_name, max_concurrent);
+            return {false, ""};
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("[CapacityManager] Redis error during lease: {}", e.what());
+        return {false, ""};
+    }
+}
+
+void CapacityManager::releaseSlot(const std::string& service_name, const std::string& slot_id) {
+    if (!redis_ || service_name.empty() || slot_id.empty()) return;
+
+    try {
+        std::string slots_key = "vbgw:slots:" + service_name;
+        std::string lease_key = "vbgw:lease:" + slot_id;
+
+        auto pipeline = redis_->pipeline();
+        pipeline.srem(slots_key, slot_id)
+                .del(lease_key)
+                .exec();
+
+        spdlog::info("[CapacityManager] Released slot {} for service {}", slot_id, service_name);
+    } catch (const std::exception& e) {
+        spdlog::error("[CapacityManager] Redis error during release: {}", e.what());
+    }
+}
+
+void CapacityManager::refreshLease(const std::string& slot_id) {
+    if (!redis_ || slot_id.empty()) return;
+
+    try {
+        std::string lease_key = "vbgw:lease:" + slot_id;
+        redis_->expire(lease_key, 30);
+    } catch (...) {
+        // Heartbeat 실패는 로그만 남김
+    }
+}
+
+int CapacityManager::getActiveCount(const std::string& service_name) {
+    if (!redis_) return 0;
+    try {
+        return static_cast<int>(redis_->scard("vbgw:slots:" + service_name));
+    } catch (...) {
+        return 0;
+    }
+}

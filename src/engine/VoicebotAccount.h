@@ -24,6 +24,9 @@ public:
     // 비동기 answer future를 대기하고, PJSIP Account 등록 해제
     void shutdown();
 
+    // [Phase 2] 비동기 응답 처리 헬퍼
+    void asyncAnswerCall(std::shared_ptr<pj::Call> call, int call_id, int answer_delay_ms);
+
 private:
     // [C-3 Fix] detach() 대신 future 보관 — 소멸자에서 완료 보장
     std::mutex futures_mutex_;

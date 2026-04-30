@@ -4,6 +4,8 @@
 #include "../utils/RuntimeMetrics.h"
 #include "SessionManager.h"
 #include "VoicebotCall.h"
+#include "RoutingEngine.h"
+#include "CapacityManager.h"
 
 #include <pjlib.h>
 #include <spdlog/spdlog.h>
@@ -13,6 +15,29 @@
 #include <future>
 
 using namespace pj;
+
+namespace {
+// 중복 로직을 헬퍼 함수로 분리
+void handleAcceptedIncomingCall(VoicebotAccount* acc, OnIncomingCallParam& iprm, std::shared_ptr<VoicebotCall> call)
+{
+    // 180 Ringing 전송 — PBX에 수신 알림
+    try {
+        CallOpParam ringing_prm;
+        ringing_prm.statusCode = PJSIP_SC_RINGING;
+        call->answer(ringing_prm);
+        spdlog::info("[Account] Sent 180 Ringing for Call-ID: {}", iprm.callId);
+    } catch (Error& err) {
+        spdlog::error("[Account] Failed to send 180 Ringing: {}", err.info());
+    }
+
+    // [H-6 Fix] ANSWER_DELAY_MS를 AppConfig에서 캐싱된 값으로 읽기
+    const int answer_delay_ms = AppConfig::instance().answer_delay_ms;
+    const int call_id = iprm.callId;
+    {
+        acc->asyncAnswerCall(call, call_id, answer_delay_ms);
+    }
+}
+}
 
 VoicebotAccount::VoicebotAccount() {}
 
@@ -64,78 +89,143 @@ void VoicebotAccount::onRegState(OnRegStateParam& prm)
     }
 }
 
+void VoicebotAccount::asyncAnswerCall(std::shared_ptr<pj::Call> call, int call_id, int answer_delay_ms)
+{
+    std::lock_guard<std::mutex> lock(futures_mutex_);
+
+    // 완료된 future 정리 (메모리 누적 방지)
+    answer_futures_.erase(std::remove_if(answer_futures_.begin(), answer_futures_.end(),
+                                         [](const std::future<void>& f) {
+                                             return f.wait_for(std::chrono::seconds(0)) ==
+                                                    std::future_status::ready;
+                                         }),
+                          answer_futures_.end());
+
+    // 200 OK 응답을 별도 스레드에서 비동기 처리
+    answer_futures_.push_back(
+        std::async(std::launch::async, [this, call, call_id, answer_delay_ms]() {
+            thread_local pj_thread_desc thread_desc;
+            thread_local pj_thread_t* pj_thread = nullptr;
+            if (!pj_thread_is_registered()) {
+                pj_thread_register("vbgw_answer", thread_desc, &pj_thread);
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(answer_delay_ms));
+            try {
+                pj::CallOpParam ok_prm;
+                ok_prm.statusCode = PJSIP_SC_OK;
+                call->answer(ok_prm);
+                spdlog::info("[Account] Sent 200 OK for Call-ID: {}", call_id);
+            } catch (Error& err) {
+                spdlog::error("[Account] Failed to answer call {}: {}", call_id, err.info());
+                SessionManager::getInstance().removeCall(call_id);
+            } catch (...) {
+                spdlog::error("[Account] Unknown error answering call {}", call_id);
+                SessionManager::getInstance().removeCall(call_id);
+            }
+        }));
+}
+
 void VoicebotAccount::onIncomingCall(OnIncomingCallParam& iprm)
 {
-    spdlog::info("[Account] Incoming SIP call, Call-ID: {}", iprm.callId);
+    // [Phase 0] destination_number 및 source_gateway 추출
+    std::string destination_number;
+    std::string source_gateway = "unknown"; // Default
 
-    // [Phase3-M1 Fix] tryAddCall()으로 TOCTOU 방지 — canAcceptCall()+addCall() 분리 제거
-    auto call = std::make_shared<VoicebotCall>(*this, iprm.callId);
-    if (!SessionManager::getInstance().tryAddCall(iprm.callId, call)) {
-        spdlog::warn("[Account] Max call limit reached. Rejecting call {} with 486 Busy Here.",
-                     iprm.callId);
-        CallOpParam prm;
-        prm.statusCode = PJSIP_SC_BUSY_HERE;
-        try {
-            call->hangup(prm);
-        } catch (const pj::Error& e) {
-            spdlog::debug("[Account] Reject hangup suppressed pj::Error: {}", e.info());
-        } catch (...) {
-            spdlog::debug("[Account] Reject hangup suppressed unknown error");
+    pjsip_rx_data *rdata = static_cast<pjsip_rx_data*>(iprm.rdata.pjRxData);
+    if (rdata && rdata->msg_info.msg->type == PJSIP_REQUEST_MSG) {
+        pjsip_uri *uri = rdata->msg_info.msg->line.req.uri;
+        pjsip_sip_uri *sip_uri = (pjsip_sip_uri*) pjsip_uri_get_uri(uri);
+        if (sip_uri) {
+            destination_number.assign(sip_uri->user.ptr, sip_uri->user.slen);
         }
-        return;
+
+        // source_gateway 식별 (단순화: remote_name 사용)
+        if (rdata->pkt_info.src_name[0] != '\0') {
+            source_gateway.assign(rdata->pkt_info.src_name);
+        }
     }
 
-    // 180 Ringing 전송 — PBX에 수신 알림
-    try {
-        CallOpParam ringing_prm;
-        ringing_prm.statusCode = PJSIP_SC_RINGING;
-        call->answer(ringing_prm);
-        spdlog::info("[Account] Sent 180 Ringing for Call-ID: {}", iprm.callId);
-    } catch (Error& err) {
-        spdlog::error("[Account] Failed to send 180 Ringing: {}", err.info());
-    }
+    spdlog::info("[Account] Incoming SIP call, Call-ID: {}, Dest: {}, From: {}", 
+                 iprm.callId, destination_number, source_gateway);
 
-    // [H-6 Fix] ANSWER_DELAY_MS를 AppConfig에서 캐싱된 값으로 읽기
-    const int answer_delay_ms = AppConfig::instance().answer_delay_ms;
-    const int call_id = iprm.callId;
-    {
-        std::lock_guard<std::mutex> lock(futures_mutex_);
+    // [Phase 0] RoutingEngine을 통한 라우팅 해석
+    auto route = RoutingEngine::getInstance().resolveRoute(destination_number, "default-policy", source_gateway);
 
-        // 완료된 future 정리 (메모리 누적 방지)
-        answer_futures_.erase(std::remove_if(answer_futures_.begin(), answer_futures_.end(),
-                                             [](const std::future<void>& f) {
-                                                 return f.wait_for(std::chrono::seconds(0)) ==
-                                                        std::future_status::ready;
-                                             }),
-                              answer_futures_.end());
+    if (route.matched) {
+        // [Phase 2] CapacityManager를 통한 Slot 할당 시도
+        auto lease = CapacityManager::getInstance().leaseSlot(route.service_name, route.capacity.max_concurrent);
+        if (!lease.success) {
+            spdlog::warn("[Account] Overflow for service {}. Policy: {}", route.service_name, route.capacity.overflow.policy);
+            
+            if (route.capacity.overflow.policy == "direct_transfer" && !route.capacity.overflow.target.empty()) {
+                // [T-1] Direct Transfer (302 Redirect)
+                spdlog::info("[Account] Redirecting overflow call to {}", route.capacity.overflow.target);
+                
+                pj::CallOpParam prm;
+                prm.statusCode = PJSIP_SC_MOVED_TEMPORARILY;
+                
+                // [Step 4] Contact 헤더 동적 주입
+                pj::SipHeader contact;
+                contact.hName = "Contact";
+                contact.hValue = "<" + route.capacity.overflow.target + ">";
+                prm.txOption.headers.push_back(contact);
 
-        // 200 OK 응답을 별도 스레드에서 비동기 처리
-        answer_futures_.push_back(
-            std::async(std::launch::async, [call, call_id, answer_delay_ms]() {
-                // [CR-4 Fix] pj_thread_desc를 thread_local로 변경
-                // 스택 로컬 pj_thread_desc는 std::async 태스크 완료 시 소멸하지만,
-                // PJLIB 스레드 레지스트리는 여전히 이 메모리를 참조 → Use-After-Free
-                // thread_local은 스레드 생존 기간 동안 유지되므로 UAF 방지
-                thread_local pj_thread_desc thread_desc;
-                thread_local pj_thread_t* pj_thread = nullptr;
-                if (!pj_thread_is_registered()) {
-                    pj_thread_register("vbgw_answer", thread_desc, &pj_thread);
-                }
+                // 180 Ringing 먼저 전송하여 호 진행 상태 알림 (일부 스택 호환성)
+                pjsua_call_answer2(iprm.callId, NULL, PJSIP_SC_RINGING, NULL, NULL);
 
-                std::this_thread::sleep_for(std::chrono::milliseconds(answer_delay_ms));
-                try {
-                    CallOpParam ok_prm;
-                    ok_prm.statusCode = PJSIP_SC_OK;
-                    call->answer(ok_prm);
-                    spdlog::info("[Account] Sent 200 OK for Call-ID: {}", call_id);
-                } catch (Error& err) {
-                    spdlog::error("[Account] Failed to answer call {}: {}", call_id, err.info());
-                    SessionManager::getInstance().removeCall(call_id);
-                } catch (...) {
-                    spdlog::error("[Account] Unknown error answering call {}", call_id);
-                    SessionManager::getInstance().removeCall(call_id);
-                }
-            }));
+                // C API로 직접 응답 (PJSUA2 answer()는 3xx 처리에 제약이 있을 수 있음)
+
+                pjsua_msg_data msg_data;
+                pjsua_msg_data_init(&msg_data);
+                
+                // SipTxOption에서 pjsua_msg_data로 변환
+                pj_pool_t* pool = pj_pool_create(pjsua_get_pool_factory(), "redirect", 512, 512, NULL);
+                msg_data.hdr_list.next = msg_data.hdr_list.prev = &msg_data.hdr_list;
+                
+                pj_str_t h_name = pj_str((char*)contact.hName.c_str());
+                pj_str_t h_value = pj_str((char*)contact.hValue.c_str());
+                pjsip_generic_string_hdr* h = pjsip_generic_string_hdr_create(
+                    pool, &h_name, &h_value);
+                pj_list_insert_before(&msg_data.hdr_list, h);
+
+                // 302 응답과 함께 연결 거절 (Redirection)
+                pjsua_call_hangup(iprm.callId, prm.statusCode, NULL, &msg_data);
+                
+                pj_pool_release(pool);
+                return;
+            } else {
+                pjsua_call_hangup(iprm.callId, PJSIP_SC_BUSY_HERE, NULL, NULL);
+                return;
+            }
+        }
+        
+        // Slot 할당 성공
+        auto call = std::make_shared<VoicebotCall>(*this, iprm.callId);
+        call->setRoutingInfo(route.service_name, route.entry_number, route.route_type);
+        call->setSlotId(lease.slot_id);
+
+        if (!SessionManager::getInstance().tryAddCall(iprm.callId, call)) {
+            CapacityManager::getInstance().releaseSlot(route.service_name, lease.slot_id);
+            spdlog::warn("[Account] Max call limit reached. Rejecting call {} with 486 Busy Here.",
+                         iprm.callId);
+            CallOpParam prm;
+            prm.statusCode = PJSIP_SC_BUSY_HERE;
+            try { call->hangup(prm); } catch(...) {}
+            return;
+        }
+
+        handleAcceptedIncomingCall(this, iprm, call);
+    } else {
+        // Unknown entry: static fallback
+        spdlog::warn("[Account] No route matched for Dest: {}. Fallback to static.", destination_number);
+        
+        auto call = std::make_shared<VoicebotCall>(*this, iprm.callId);
+        if (!SessionManager::getInstance().tryAddCall(iprm.callId, call)) {
+            pjsua_call_answer2(iprm.callId, NULL, PJSIP_SC_BUSY_HERE, NULL, NULL);
+            return;
+        }
+        handleAcceptedIncomingCall(this, iprm, call);
     }
 }
 

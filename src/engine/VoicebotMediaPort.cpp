@@ -52,6 +52,11 @@ void VoicebotMediaPort::setVadSpeechStartCallback(std::function<void()> cb)
     on_vad_speech_start_ = std::move(cb);
 }
 
+void VoicebotMediaPort::setVadSpeechEndCallback(std::function<void()> cb)
+{
+    on_vad_speech_end_ = std::move(cb);
+}
+
 void VoicebotMediaPort::setAiPaused(bool paused)
 {
     ai_paused_.store(paused, std::memory_order_release);
@@ -88,6 +93,8 @@ void VoicebotMediaPort::onFrameReceived(pj::MediaFrame& frame)
         bool is_speaking = vad_->isSpeaking(pcm16, samples);
         if (is_speaking && !last_vad_state_ && on_vad_speech_start_) {
             on_vad_speech_start_();
+        } else if (!is_speaking && last_vad_state_ && on_vad_speech_end_) {
+            on_vad_speech_end_();
         }
         last_vad_state_ = is_speaking;
 

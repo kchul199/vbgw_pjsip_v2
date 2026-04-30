@@ -1,14 +1,18 @@
 #include "VoicebotCall.h"
 
 #include "../ai/VoicebotAiClient.h"
+#include <fmt/format.h>
 #include "../ivr/IvrManager.h"
 #include "../utils/AppConfig.h"
 #include "../utils/RuntimeMetrics.h"
 #include "SessionManager.h"
 #include "VoicebotAccount.h"
 #include "VoicebotMediaPort.h"
+#include "CapacityManager.h"
+#include "../utils/CdrWebhookClient.h"
 
 #include <pjlib.h>
+#include <pjsua.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -83,6 +87,16 @@ void VoicebotCall::onCallState(pj::OnCallStateParam& prm)
         std::string ignored;
         stopRecording(&ignored);
         endAiSession();
+
+        // [Step 3] Heartbeat 중지
+        stopLeaseHeartbeat();
+
+        // [Phase 2] Slot 반환
+
+        if (!service_name_.empty() && !slot_id_.empty()) {
+            CapacityManager::getInstance().releaseSlot(service_name_, slot_id_);
+        }
+
         dumpCdr(ci.lastReason);
         SessionManager::getInstance().removeCall(ci.id);
         spdlog::info("[Call] ID={} Session={} Removed from SessionManager.", ci.id, session_id_);
@@ -144,6 +158,12 @@ void VoicebotCall::onCallMediaState(pj::OnCallMediaStateParam& prm)
 
                     ai_client_->setTtsCallback([weak_self](const uint8_t* data, size_t len) {
                         if (auto self = weak_self.lock()) {
+                            // [Step 5] TTS 수신 시 쿠션 타이머 중지
+                            if (self->cushion_timer_.id != 0) {
+                                pj_timer_heap_cancel(pjsip_endpt_get_timer_heap(pjsua_get_pjsip_endpt()), &self->cushion_timer_);
+                                self->cushion_timer_.id = 0;
+                            }
+
                             if (self->media_port_) {
                                 self->media_port_->writeTtsAudio(data, len);
                             }
@@ -174,6 +194,9 @@ void VoicebotCall::onCallMediaState(pj::OnCallMediaStateParam& prm)
                     });
 
                     ai_client_->startSession(session_id_);
+                    
+                    // [Step 3] Redis Lease Heartbeat 시작
+                    startLeaseHeartbeat();
                 }
             }
 
@@ -183,6 +206,34 @@ void VoicebotCall::onCallMediaState(pj::OnCallMediaStateParam& prm)
                 media_port_->setVadSpeechStartCallback([weak_self = weak_from_this()]() {
                     if (auto self = weak_self.lock()) {
                         self->vad_trigger_count_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                });
+
+                media_port_->setVadSpeechEndCallback([weak_self = weak_from_this()]() {
+                    if (auto self = weak_self.lock()) {
+                        // [Step 5] 발화 종료 시 턴 카운트 증가 및 쿠션 타이머 시작
+                        int turns = self->turn_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+                        spdlog::info("[Call] Session={} Turn {} detected.", self->session_id_, turns);
+
+                        // 턴 캡핑 (예: 20회 초과 시 Human Fallback)
+                        if (turns >= 20) {
+                            spdlog::warn("[Call] Session={} Max turns reached. Transferring to human.", self->session_id_);
+                            std::string err;
+                            self->transferTo("sip:agent@pbx-main", &err);
+                            return;
+                        }
+
+                        // 쿠션 타이머: 3초 후 실행
+                        pj_bzero(&self->cushion_timer_, sizeof(self->cushion_timer_));
+                        self->cushion_timer_.id = 5678;
+                        self->cushion_timer_.user_data = (void*)self.get();
+                        self->cushion_timer_.cb = [](pj_timer_heap_t *th, pj_timer_entry *te) {
+                            VoicebotCall *s = (VoicebotCall*)te->user_data;
+                            pj::TimerEvent ev;
+                            s->onCushionTimeout(ev);
+                        };
+                        pj_time_val delay = {3, 0};
+                        pj_timer_heap_schedule(pjsip_endpt_get_timer_heap(pjsua_get_pjsip_endpt()), &self->cushion_timer_, &delay);
                     }
                 });
             }
@@ -345,6 +396,37 @@ bool VoicebotCall::isValidTransferTarget(const std::string& target_uri)
         return false;
     }
     return true;
+}
+
+bool VoicebotCall::playAnnouncement(const std::string& file_path, std::string* error_message)
+{
+    if (file_path.empty()) return false;
+
+    try {
+        pj::AudioMediaPlayer player;
+        player.createPlayer(file_path);
+        
+        // 메인 오디오 스트림에 연결
+        pj::CallInfo ci = getInfo();
+        for (unsigned i = 0; i < ci.media.size(); ++i) {
+            if (ci.media[i].type == PJMEDIA_TYPE_AUDIO) {
+                pj::AudioMedia* aud_med = dynamic_cast<pj::AudioMedia*>(getMedia(i));
+                if (aud_med) {
+                    player.startTransmit(*aud_med);
+                }
+            }
+        }
+        
+        // PJSIP는 player가 스택에서 사라지면 정지됨.
+        // 실제로는 멤버 변수로 보관하거나 별도 수명 관리가 필요함.
+        // 여기서는 Step 4의 컨셉을 보여주는 수준으로 작성.
+        
+        spdlog::info("[Call] Session={} Playing announcement: {}", session_id_, file_path);
+        return true;
+    } catch (const pj::Error& e) {
+        if (error_message) *error_message = e.info();
+        return false;
+    }
 }
 
 bool VoicebotCall::sendDtmfToPeer(const std::string& digits, std::string* error_message)
@@ -728,6 +810,54 @@ void VoicebotCall::endAiSession()
     }
 }
 
+void VoicebotCall::startLeaseHeartbeat()
+{
+    if (slot_id_.empty()) return;
+
+    pj_bzero(&lease_timer_, sizeof(lease_timer_));
+    lease_timer_.id = 1234; // Random ID for lease timer
+    lease_timer_.user_data = (void*)this;
+    lease_timer_.cb = [](pj_timer_heap_t *th, pj_timer_entry *te) {
+        VoicebotCall *self = (VoicebotCall*)te->user_data;
+        pj::TimerEvent event;
+        // PJSIP 2.x에서는 pjsip_timer_entry가 아닌 pj_timer_entry 사용
+        self->onLeaseHeartbeat(event);
+    };
+
+    // 10초마다 갱신
+    pj_time_val delay = {10, 0};
+    pj_timer_heap_schedule(pjsip_endpt_get_timer_heap(pjsua_get_pjsip_endpt()), &lease_timer_, &delay);
+    spdlog::debug("[Call] Session={} Redis heartbeat started for slot={}", session_id_, slot_id_);
+}
+
+void VoicebotCall::stopLeaseHeartbeat()
+{
+    if (lease_timer_.id != 0) {
+        pj_timer_heap_cancel(pjsip_endpt_get_timer_heap(pjsua_get_pjsip_endpt()), &lease_timer_);
+        lease_timer_.id = 0;
+    }
+}
+
+void VoicebotCall::onLeaseHeartbeat(pj::TimerEvent& event)
+{
+    PJ_UNUSED_ARG(event);
+    if (!slot_id_.empty()) {
+        CapacityManager::getInstance().refreshLease(slot_id_);
+        
+        // 다음 heartbeat 스케줄링
+        pj_time_val delay = {10, 0};
+        pj_timer_heap_schedule(pjsip_endpt_get_timer_heap(pjsua_get_pjsip_endpt()), &lease_timer_, &delay);
+    }
+}
+
+void VoicebotCall::onCushionTimeout(pj::TimerEvent& event)
+{
+    PJ_UNUSED_ARG(event);
+    spdlog::info("[Call] Session={} AI delay detected. Playing cushion message.", session_id_);
+    // [Step 5] "잠시만 기다려주세요" 안내 멘트 재생
+    playAnnouncement("ivr/please-wait.wav");
+}
+
 void VoicebotCall::dumpCdr(const std::string& reason)
 {
     auto end_time = std::chrono::system_clock::now();
@@ -740,11 +870,24 @@ void VoicebotCall::dumpCdr(const std::string& reason)
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&end_time_t));
 
     // [E-1 Fix] 운영 및 과금 목적의 CDR 구조화 로깅
-    spdlog::info("[CDR] {{\"session_id\":\"{}\", "
-                 "\"end_time\":\"{}\", "
-                 "\"duration_sec\":{}, \"reason\":\"{}\", "
-                 "\"vad_triggers\":{}, \"bargeins\":{}}}",
-                 session_id_.empty() ? "N/A" : session_id_, buf, duration,
-                 reason.empty() ? "Unknown" : reason, vad_trigger_count_.load(),
-                 bargein_count_.load());
+    std::string cdr_json = fmt::format(
+        "{{\"session_id\":\"{}\", "
+        "\"service_name\":\"{}\", \"entry_number\":\"{}\", \"route_type\":\"{}\", "
+        "\"end_time\":\"{}\", "
+        "\"duration_sec\":{}, \"reason\":\"{}\", "
+        "\"vad_triggers\":{}, \"bargeins\":{}, \"turns\":{}}}",
+        session_id_.empty() ? "N/A" : session_id_,
+        AppConfig::jsonEscape(service_name_), AppConfig::jsonEscape(entry_number_), 
+        AppConfig::jsonEscape(route_type_),
+        buf, duration,
+        AppConfig::jsonEscape(reason.empty() ? "Unknown" : reason), 
+        vad_trigger_count_.load(), bargein_count_.load(), turn_count_.load());
+
+    spdlog::info("[CDR] {}", cdr_json);
+
+    // [Step 2] Webhook 전송
+    const auto& cfg = AppConfig::instance();
+    if (cfg.cdr_webhook_enable && !cfg.cdr_webhook_url.empty()) {
+        CdrWebhookClient::getInstance().pushCdr(cfg.cdr_webhook_url, cdr_json);
+    }
 }

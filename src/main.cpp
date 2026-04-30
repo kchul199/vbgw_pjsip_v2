@@ -2,8 +2,12 @@
 #include "engine/SessionManager.h"
 #include "engine/VoicebotAccount.h"
 #include "engine/VoicebotEndpoint.h"
+#include "engine/RoutingEngine.h"
+#include "engine/AccountManager.h"
+#include "engine/CapacityManager.h"
 #include "utils/AppConfig.h"
 #include "utils/RuntimeMetrics.h"
+#include "utils/CdrWebhookClient.h"
 
 #include <spdlog/sinks/daily_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -78,6 +82,14 @@ int main()
     // [H-6 Fix] AppConfig 싱글톤 초기화 — 모든 환경변수를 1회 읽어 캐싱
     const auto& cfg = AppConfig::instance();
 
+    // [Phase 0] RoutingEngine 초기화
+    RoutingEngine::getInstance().loadConfig(cfg.routing_config_path);
+
+    // [Step 3] CapacityManager (Redis) 초기화
+    if (!CapacityManager::getInstance().init(cfg.redis_addr)) {
+        spdlog::warn("[VBGW] Redis initialization failed. Using local fallback (Phase 2 mode).");
+    }
+
     // [O4-1] 멀티싱크 로거: 콘솔 + 파일 (LOG_DIR 환경변수 설정 시 활성)
     // 파일 로그: 10MB 롤링, 최대 5개 보관
     auto log_level = spdlog::level::from_str(cfg.log_level);
@@ -99,6 +111,12 @@ int main()
     auto logger = std::make_shared<spdlog::logger>("vbgw", sinks.begin(), sinks.end());
     logger->set_level(log_level);
     spdlog::set_default_logger(logger);
+
+    // [Step 2] CDR Webhook 서비스 시작
+    CdrWebhookClient::getInstance().start();
+
+    // [Step 4] PBX Active Probing 시작
+    AccountManager::getInstance().startProbing();
 
     spdlog::info("Starting AI Voicebot Gateway (PJSUA2)... [profile={}, log_level={}{}]",
                  cfg.runtime_profile, cfg.log_level,
@@ -199,44 +217,56 @@ int main()
     acc_cfg.mediaConfig.transportConfig.portRange = cfg.rtp_port_max - cfg.rtp_port_min;
     acc_cfg.mediaConfig.transportConfig.port = cfg.rtp_port_min;
 
+    auto createAccConfig = [&](const AppConfig::PbxConfig& pbx_cfg) {
+        pj::AccountConfig a_cfg = acc_cfg;
+        a_cfg.idUri = pbx_cfg.id_uri;
+        if (pbx_cfg.register_enable) {
+            a_cfg.regConfig.registrarUri = pbx_cfg.uri;
+            a_cfg.regConfig.retryIntervalSec = 60;
+        }
+        a_cfg.sipConfig.authCreds.push_back(
+            pj::AuthCredInfo("digest", "*", pbx_cfg.username, 0, pbx_cfg.password));
+        return a_cfg;
+    };
+
     if (cfg.pbx_mode) {
         RuntimeMetrics::instance().setSipMode(true);
 
-        acc_cfg.idUri = cfg.pbx_id_uri;
-
-        if (cfg.sip_register_enable) {
-            acc_cfg.regConfig.registrarUri = cfg.pbx_uri;
-            // [M-3 Fix] PBX 등록 끊김 시 PJSIP 자동 재등록 시도 간격(초)
-            acc_cfg.regConfig.retryIntervalSec = 60;
-            spdlog::info("[VBGW] PBX Registration Mode Enabled.");
-            spdlog::info("       - Registrar: {}", cfg.pbx_uri);
-        } else {
-            spdlog::info("[VBGW] SBC Trunk Mode Enabled (No Registration).");
-            spdlog::info("       - Trunk IP expected at: {}", cfg.pbx_uri);
+        if (cfg.pbx_main.enabled) {
+            auto acc = std::make_shared<VoicebotAccount>();
+            try {
+                acc->create(createAccConfig(cfg.pbx_main));
+                AccountManager::getInstance().addAccount("main", acc);
+                spdlog::info("[VBGW] Primary PBX Account created: {}", cfg.pbx_main.uri);
+            } catch (pj::Error& err) {
+                spdlog::error("Error creating primary account: {}", err.info());
+            }
         }
 
-        spdlog::info("       - ID URI: {}", cfg.pbx_id_uri);
-
-        acc_cfg.sipConfig.authCreds.push_back(
-            pj::AuthCredInfo("digest", "*", cfg.pbx_username, 0, cfg.pbx_password));
+        if (cfg.pbx_standby.enabled) {
+            auto acc = std::make_shared<VoicebotAccount>();
+            try {
+                acc->create(createAccConfig(cfg.pbx_standby));
+                AccountManager::getInstance().addAccount("standby", acc);
+                spdlog::info("[VBGW] Standby PBX Account created: {}", cfg.pbx_standby.uri);
+            } catch (pj::Error& err) {
+                spdlog::error("Error creating standby account: {}", err.info());
+            }
+        }
     } else {
         RuntimeMetrics::instance().setSipMode(false);
         RuntimeMetrics::instance().setSipRegistration(true, 200);
 
+        auto acc = std::make_shared<VoicebotAccount>();
         acc_cfg.idUri = "sip:voicebot@127.0.0.1";
-        spdlog::info("[VBGW] Local Mode Enabled (No PBX). Direct IP calls: {}", acc_cfg.idUri);
+        try {
+            acc->create(acc_cfg);
+            AccountManager::getInstance().addAccount("main", acc);
+            spdlog::info("[VBGW] Local Mode Enabled (No PBX). Direct IP calls: {}", acc_cfg.idUri);
+        } catch (pj::Error& err) {
+            spdlog::error("Error creating local account: {}", err.info());
+        }
     }
-
-    // 계정 생성 및 PBX REG 등록
-    VoicebotAccount acc;
-    try {
-        acc.create(acc_cfg);
-        spdlog::info("Voicebot Account created. Listening or Registered to PBX successfully!");
-    } catch (pj::Error& err) {
-        spdlog::error("Error creating account: {}", err.info());
-        return 1;
-    }
-    HttpServer::getInstance().setAccount(&acc);
 
     // [H-4, H-5, E-2 Fix] 내장 관리 서버 시작
     if (!HttpServer::getInstance().start(cfg.http_port)) {
@@ -355,15 +385,18 @@ int main()
     spdlog::info("[Shutdown 4/5] Clearing all call references...");
     SessionManager::getInstance().clearAllCalls();
 
+    // [Step 4] PBX Probing 서비스 종료
+    AccountManager::getInstance().stopProbing();
+
+    // [Step 2] Webhook 서비스 종료 (지연 전송분 처리 대기)
+    CdrWebhookClient::getInstance().stop();
+
     // 5단계: PJSIP Account/Endpoint 종료
-    // acc의 소멸자가 main() 종료 시 호출되므로, ep.shutdown() 전에
-    // Account를 명시적으로 정리하여 소멸자-PJSIP 경합 방지
     spdlog::info("[Shutdown 5/5] Shutting down SIP/PJLIB...");
     try {
-        acc.shutdown();
-    } catch (...) {
-        // acc.shutdown()은 PJSIP 내부 에러를 발생시킬 수 있음 — 무시
-    }
+        if (auto acc = AccountManager::getInstance().getPrimaryAccount()) acc->shutdown();
+        if (auto acc = AccountManager::getInstance().getStandbyAccount()) acc->shutdown();
+    } catch (...) {}
 
     ep.shutdown();
 

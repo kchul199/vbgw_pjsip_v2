@@ -35,6 +35,9 @@ public:
 
     // VAD speech-start 이벤트 콜백 (false->true edge)
     void setVadSpeechStartCallback(std::function<void()> cb);
+    
+    // [Step 5] VAD speech-end 이벤트 콜백 (true->false edge)
+    void setVadSpeechEndCallback(std::function<void()> cb);
 
     // [P2-2 Fix] AI 포워딩 일시정지 설정 (Bridge 모드 등에서 AI 개입 차단)
     void setAiPaused(bool paused);
@@ -46,6 +49,7 @@ private:
     std::unique_ptr<SpeexDsp> speex_dsp_;  // RAII — Denoise + AGC
 
     std::function<void()> on_vad_speech_start_;
+    std::function<void()> on_vad_speech_end_;
     bool last_vad_state_ = false;
 
     // [P2-2 Fix] AI 포워딩 일시정지 플래그

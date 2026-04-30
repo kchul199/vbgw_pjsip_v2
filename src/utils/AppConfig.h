@@ -66,12 +66,17 @@ public:
     bool sip_accept_replaces;
 
     // ── PBX 설정 ──
-    std::string pbx_uri;
-    std::string pbx_id_uri;
-    std::string pbx_username;
-    std::string pbx_password;
-    bool pbx_mode;             // 4개 모두 설정되었는지
-    bool sip_register_enable;  // SBC Trunk 모드 스위치
+    struct PbxConfig {
+        std::string uri;
+        std::string id_uri;
+        std::string username;
+        std::string password;
+        bool register_enable;
+        bool enabled = false;
+    };
+    PbxConfig pbx_main;
+    PbxConfig pbx_standby;
+    bool pbx_mode;             // pbx_main.enabled || pbx_standby.enabled
 
     // ── AI 엔진 (gRPC) 설정 ──
     std::string ai_engine_addr;
@@ -124,6 +129,9 @@ public:
     int pjsip_log_level;
     bool pjsip_null_audio;
 
+    // ── 라우팅 설정 ──
+    std::string routing_config_path;
+
     // ── 런타임 프로파일 ──
     std::string runtime_profile;
 
@@ -132,6 +140,13 @@ public:
     std::string call_recording_dir;
     int call_recording_max_days;  // [P2-1 Fix] 오래된 녹음 파일 보관 일수
     int call_recording_max_mb;    // [P2-1 Fix] 녹음 디렉토리 최대 용량(MB)
+
+    // ── Webhook 설정 ──
+    bool cdr_webhook_enable;
+    std::string cdr_webhook_url;
+
+    // ── Redis 설정 ──
+    std::string redis_addr;
 
     // [CR-1 Fix] gRPC 채널을 싱글톤으로 공유
     // TCP 연결 + HTTP/2 핸드셰이크 + TLS 협상을 1회만 수행
@@ -292,14 +307,23 @@ private:
             sip_timer_sess_expires_secs = sip_timer_min_se_secs;
         }
 
-        // ── PBX ──
-        pbx_uri = readStr("PBX_URI", "");
-        pbx_id_uri = readStr("PBX_ID_URI", "");
-        pbx_username = readStr("PBX_USERNAME", "");
-        pbx_password = readStr("PBX_PASSWORD", "");
-        pbx_mode = !pbx_uri.empty() && !pbx_id_uri.empty() && !pbx_username.empty() &&
-                   !pbx_password.empty();
-        sip_register_enable = readBool("SIP_REGISTER_ENABLE", true);
+        // ── PBX Main ──
+        pbx_main.uri = readStr("PBX_MAIN_URI", readStr("PBX_URI", ""));
+        pbx_main.id_uri = readStr("PBX_MAIN_ID_URI", readStr("PBX_ID_URI", ""));
+        pbx_main.username = readStr("PBX_MAIN_USERNAME", readStr("PBX_USERNAME", ""));
+        pbx_main.password = readStr("PBX_MAIN_PASSWORD", readStr("PBX_PASSWORD", ""));
+        pbx_main.register_enable = readBool("PBX_MAIN_REGISTER_ENABLE", readBool("SIP_REGISTER_ENABLE", true));
+        pbx_main.enabled = !pbx_main.uri.empty() && !pbx_main.id_uri.empty();
+
+        // ── PBX Standby ──
+        pbx_standby.uri = readStr("PBX_STANDBY_URI", "");
+        pbx_standby.id_uri = readStr("PBX_STANDBY_ID_URI", "");
+        pbx_standby.username = readStr("PBX_STANDBY_USERNAME", "");
+        pbx_standby.password = readStr("PBX_STANDBY_PASSWORD", "");
+        pbx_standby.register_enable = readBool("PBX_STANDBY_REGISTER_ENABLE", true);
+        pbx_standby.enabled = !pbx_standby.uri.empty() && !pbx_standby.id_uri.empty();
+
+        pbx_mode = pbx_main.enabled || pbx_standby.enabled;
 
         // ── AI Engine (gRPC) ──
         ai_engine_addr = readStr("AI_ENGINE_ADDR", "localhost:50051");
@@ -365,6 +389,9 @@ private:
         pjsip_log_level = readInt("PJSIP_LOG_LEVEL", 3, 0, 6);
         pjsip_null_audio = readBool("PJSIP_NULL_AUDIO", false);
 
+        // ── Routing ──
+        routing_config_path = readStr("ROUTING_CONFIG_PATH", "config/routing.yaml");
+
         // ── API Server ──
         http_port = readInt("HTTP_PORT", 8080, 1, 65535);
         admin_api_key = readStr("ADMIN_API_KEY", "changeme-admin-key");
@@ -381,6 +408,13 @@ private:
         call_recording_dir = readStr("CALL_RECORDING_DIR", "recordings");
         call_recording_max_days = readInt("CALL_RECORDING_MAX_DAYS", 30, 1, 3650);
         call_recording_max_mb = readInt("CALL_RECORDING_MAX_MB", 1024, 10, 1048576);  // 기본 1GB
+
+        // ── Webhook ──
+        cdr_webhook_enable = readBool("CDR_WEBHOOK_ENABLE", false);
+        cdr_webhook_url = readStr("CDR_WEBHOOK_URL", "");
+
+        // ── Redis ──
+        redis_addr = readStr("REDIS_ADDR", "tcp://127.0.0.1:6379");
     }
 
     ~AppConfig() = default;
@@ -424,6 +458,26 @@ private:
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         return normalized == "1" || normalized == "true" || normalized == "yes" ||
                normalized == "on";
+    }
+
+public:
+    static std::string jsonEscape(const std::string& input)
+    {
+        std::string out;
+        out.reserve(input.size());
+        for (char c : input) {
+            if (c == '\\' || c == '"') {
+                out.push_back('\\');
+                out.push_back(c);
+            } else if (c == '\n') {
+                out.append("\\n");
+            } else if (c == '\r') {
+                out.append("\\r");
+            } else {
+                out.push_back(c);
+            }
+        }
+        return out;
     }
 
     void validateAiAddr() const
