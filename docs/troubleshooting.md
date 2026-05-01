@@ -15,6 +15,19 @@ Voicebot Gateway(VBGW) 운영 중 발생 가능한 문제와 해결 방법입니
 - **현상**: 컴파일 시 `pjsua.h` 헤더를 찾을 수 없음.
 - **해결**: `brew install pjproject`가 정상적으로 완료되었는지 확인하고, `pkg-config --cflags libpjproject` 명령어로 경로가 출력되는지 점검하십시오.
 
+### 1.3 `MAX_CONCURRENT_CALLS`를 높여도 실제로는 4콜만 수락함
+- **현상**: 시작 로그에는 `max_concurrent_calls=1000`처럼 보이지만, 부하 테스트에서 `Unable to accept incoming call (too many calls)`가 거의 즉시 발생하고 `Call-ID 0~3`만 반복 사용됨.
+- **원인**: 링크된 PJPROJECT가 컴파일타임 `PJSUA_MAX_CALLS=4`로 빌드되어 있으면, 런타임 `uaConfig.maxCalls`는 그 값을 넘을 수 없습니다.
+- **해결**:
+  1. `./build/vbgw` 시작 로그에서 `compile_time_cap` 값을 확인하십시오.
+  2. `4`로 제한되어 있다면 로컬 커스텀 빌드를 사용하십시오:
+```bash
+./scripts/build_local_pjproject.sh
+BUILD_DIR=build-local ./scripts/configure_with_local_pjproject.sh -DCMAKE_BUILD_TYPE=Release
+cmake --build build-local
+```
+  3. 기본값이 부족하면 `PJ_MAX_CALLS`, `PJ_MAX_CONF_PORTS`, `PJ_MAX_TSX_COUNT`를 환경변수로 상향한 뒤 스크립트를 다시 실행하십시오.
+
 ## 2. 런타임 오류 (Runtime Issues)
 
 ### 2.1 VAD 모델 로드 실패

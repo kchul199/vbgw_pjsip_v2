@@ -414,7 +414,16 @@ private:
         cdr_webhook_url = readStr("CDR_WEBHOOK_URL", "");
 
         // ── Redis ──
-        redis_addr = readStr("REDIS_ADDR", "tcp://127.0.0.1:6379");
+        redis_addr = readStr("REDIS_ADDR", "");
+        if (redis_addr.empty()) {
+            const auto legacy_redis_url = readStr("REDIS_URL", "");
+            if (!legacy_redis_url.empty()) {
+                spdlog::warn("[Config] REDIS_URL is deprecated; use REDIS_ADDR instead.");
+                redis_addr = legacy_redis_url;
+            } else {
+                redis_addr = "tcp://127.0.0.1:6379";
+            }
+        }
     }
 
     ~AppConfig() = default;

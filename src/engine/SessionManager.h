@@ -18,6 +18,8 @@ public:
     void addCall(const std::string& session_id, std::shared_ptr<VoicebotCall> call);
     bool tryAddCall(const std::string& session_id, std::shared_ptr<VoicebotCall> call);
     void removeCall(const std::string& session_id);
+    std::shared_ptr<VoicebotCall> takeCallByPjsipId(int pjsip_call_id,
+                                                    std::string* session_id = nullptr);
     std::shared_ptr<VoicebotCall> getCall(const std::string& session_id);
     bool canAcceptCall();
     size_t getActiveCallCount();

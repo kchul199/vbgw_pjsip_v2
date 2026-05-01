@@ -4,11 +4,35 @@
 #include "../ai/SpeexDsp.h"
 #include "../ai/VoicebotAiClient.h"
 #include "../utils/AppConfig.h"
+#include "../utils/PjThreadHelper.h"
 #include "../utils/RingBuffer.h"
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <cstring>
+#include <vector>
+
+namespace {
+constexpr auto kRetiredMediaPortGracePeriod = std::chrono::seconds(45);
+
+std::mutex retired_ports_mutex;
+std::vector<std::pair<std::chrono::steady_clock::time_point, std::unique_ptr<VoicebotMediaPort>>>
+    retired_ports;
+
+void cleanupRetiredPortsLocked()
+{
+    const auto now = std::chrono::steady_clock::now();
+    auto it = retired_ports.begin();
+    while (it != retired_ports.end()) {
+        if (now - it->first >= kRetiredMediaPortGracePeriod) {
+            it = retired_ports.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+}  // namespace
 
 VoicebotMediaPort::VoicebotMediaPort()
     : pj::AudioMediaPort(),
@@ -39,7 +63,52 @@ VoicebotMediaPort::VoicebotMediaPort()
 }
 
 // unique_ptr이 완전한 타입(RingBuffer, SileroVad)을 필요로 하기 때문에 .cpp에서 정의
-VoicebotMediaPort::~VoicebotMediaPort() {}
+VoicebotMediaPort::~VoicebotMediaPort()
+{
+    shutdown();
+}
+
+void VoicebotMediaPort::quiesce()
+{
+    shutting_down_.store(true, std::memory_order_release);
+    ai_paused_.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        ai_client_.reset();
+    }
+}
+
+void VoicebotMediaPort::shutdown()
+{
+    quiesce();
+
+    if (unregister_requested_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    try {
+        vbgw::utils::PjThreadHelper::registerThread("vbgw_media_shutdown");
+        unregisterMediaPort();
+        spdlog::debug("[MediaPort] unregisterMediaPort requested.");
+    } catch (const pj::Error& e) {
+        spdlog::debug("[MediaPort] unregisterMediaPort skipped/failed: {}", e.info());
+    } catch (...) {
+        spdlog::debug("[MediaPort] unregisterMediaPort skipped due to unknown exception.");
+    }
+}
+
+void VoicebotMediaPort::retire(std::unique_ptr<VoicebotMediaPort> port)
+{
+    if (!port) {
+        return;
+    }
+
+    port->shutdown();
+
+    std::lock_guard<std::mutex> lock(retired_ports_mutex);
+    cleanupRetiredPortsLocked();
+    retired_ports.emplace_back(std::chrono::steady_clock::now(), std::move(port));
+}
 
 void VoicebotMediaPort::setAiClient(std::shared_ptr<VoicebotAiClient> client)
 {
@@ -65,7 +134,8 @@ void VoicebotMediaPort::setAiPaused(bool paused)
 
 void VoicebotMediaPort::onFrameReceived(pj::MediaFrame& frame)
 {
-    if (ai_paused_.load(std::memory_order_acquire)) {
+    if (shutting_down_.load(std::memory_order_acquire) ||
+        ai_paused_.load(std::memory_order_acquire)) {
         return;  // Bridge 상태 등 AI 개입 차단 모드
     }
 
@@ -106,6 +176,16 @@ void VoicebotMediaPort::onFrameReceived(pj::MediaFrame& frame)
 void VoicebotMediaPort::onFrameRequested(pj::MediaFrame& frame)
 {
     frame.type = PJMEDIA_FRAME_TYPE_AUDIO;
+    if (shutting_down_.load(std::memory_order_acquire)) {
+        if (frame.buf.size() > 0) {
+            std::memset(reinterpret_cast<uint8_t*>(frame.buf.data()), 0, frame.buf.size());
+            frame.size = frame.buf.size();
+        } else {
+            frame.size = 0;
+        }
+        return;
+    }
+
     if (frame.buf.size() > 0) {
         size_t read_bytes =
             tts_buffer_->read(reinterpret_cast<uint8_t*>(frame.buf.data()), frame.buf.size());
@@ -122,17 +202,26 @@ void VoicebotMediaPort::onFrameRequested(pj::MediaFrame& frame)
 
 void VoicebotMediaPort::writeTtsAudio(const uint8_t* data, size_t len)
 {
+    if (shutting_down_.load(std::memory_order_acquire)) {
+        return;
+    }
     tts_buffer_->write(data, len);
 }
 
 void VoicebotMediaPort::clearTtsAudio()
 {
+    if (shutting_down_.load(std::memory_order_acquire)) {
+        return;
+    }
     tts_buffer_->clear();
     spdlog::debug("[MediaPort] TTS buffer cleared (Barge-in).");
 }
 
 void VoicebotMediaPort::resetVad()
 {
+    if (shutting_down_.load(std::memory_order_acquire)) {
+        return;
+    }
     if (vad_) {
         vad_->resetState();
         last_vad_state_ = false;

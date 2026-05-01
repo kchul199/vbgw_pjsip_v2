@@ -4,6 +4,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 
@@ -28,8 +29,17 @@ bool VoicebotEndpoint::init()
         // [O4-2] PJSIP 내부 로그 레벨 — AppConfig에서 캐싱된 값 사용
         ep_cfg.logConfig.level = cfg.pjsip_log_level;
         ep_cfg.logConfig.consoleLevel = cfg.pjsip_log_level;
-        ep_cfg.uaConfig.maxCalls = static_cast<unsigned>(cfg.max_concurrent_calls);
-        spdlog::info("[Endpoint] UA max calls set to: {}", ep_cfg.uaConfig.maxCalls);
+        const auto requested_max_calls = static_cast<unsigned>(cfg.max_concurrent_calls);
+        const auto effective_max_calls = std::min<unsigned>(requested_max_calls, PJSUA_MAX_CALLS);
+        ep_cfg.uaConfig.maxCalls = effective_max_calls;
+        if (requested_max_calls > PJSUA_MAX_CALLS) {
+            spdlog::warn("[Endpoint] Requested max_concurrent_calls={} exceeds linked PJPROJECT "
+                         "compile-time cap PJSUA_MAX_CALLS={}. Effective SIP call slots are "
+                         "limited to {} until PJPROJECT is rebuilt.",
+                         requested_max_calls, PJSUA_MAX_CALLS, effective_max_calls);
+        }
+        spdlog::info("[Endpoint] UA max calls requested={} effective={} compile_time_cap={}",
+                     requested_max_calls, effective_max_calls, PJSUA_MAX_CALLS);
 
         // STUN 서버 설정 (NAT traversal)
         if (!cfg.sip_stun_server.empty()) {

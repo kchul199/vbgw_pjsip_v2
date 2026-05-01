@@ -146,6 +146,15 @@ void VoicebotAccount::onIncomingCall(OnIncomingCallParam& iprm)
     spdlog::info("[Account] Incoming SIP call, Call-ID: {}, Dest: {}, From: {}", 
                  iprm.callId, destination_number, source_gateway);
 
+    std::string stale_session_id;
+    if (auto stale_call =
+            SessionManager::getInstance().takeCallByPjsipId(iprm.callId, &stale_session_id)) {
+        spdlog::warn("[Account] Reaping stale Session={} before reusing PJSIP Call-ID={}",
+                     stale_session_id, iprm.callId);
+        stale_call->reapWithoutDisconnect(
+            "PJSIP call slot reused before DISCONNECTED callback");
+    }
+
     // [Phase 0] RoutingEngine을 통한 라우팅 해석
     auto route = RoutingEngine::getInstance().resolveRoute(destination_number, "default-policy", source_gateway);
 

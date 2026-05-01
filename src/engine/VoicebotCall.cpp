@@ -54,7 +54,8 @@ VoicebotCall::VoicebotCall(pj::Account& acc, int call_id)
       media_port_(nullptr),
       ai_client_(nullptr),
       ivr_manager_(nullptr),
-      recorder_(nullptr)
+      recorder_(nullptr),
+      initial_call_id_(call_id)
 {
     start_time_ = std::chrono::system_clock::now();
     session_id_ = generateSessionId();
@@ -106,12 +107,47 @@ VoicebotCall::~VoicebotCall()
         std::string ignored;
         stopRecording(&ignored);
         
-        // [Safety] MediaPort 명시적 종료 (onFrameReceived가 더 이상 호출되지 않도록)
-        if (media_port_) {
-            media_port_->setAiClient(nullptr);
-        }
+        // AudioMediaPort unregister는 비동기이므로 grace period 동안 별도 보관한다.
+        VoicebotMediaPort::retire(std::move(media_port_));
     } catch (...) {
         // Destructor must not throw
+    }
+}
+
+bool VoicebotCall::finalizeLifecycle(const std::string& reason)
+{
+    if (lifecycle_finalized_.exchange(true)) {
+        return false;
+    }
+
+    std::string ignored;
+    stopRecording(&ignored);
+    endAiSession();
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(media_mutex_);
+        announcement_player_.reset();
+        if (media_port_) {
+            media_port_->quiesce();
+        }
+    }
+
+    stopLeaseHeartbeat();
+
+    if (!service_name_.empty() && !slot_id_.empty()) {
+        CapacityManager::getInstance().releaseSlot(service_name_, slot_id_);
+        slot_id_.clear();
+    }
+
+    dumpCdr(reason);
+    return true;
+}
+
+void VoicebotCall::reapWithoutDisconnect(const std::string& reason)
+{
+    if (finalizeLifecycle(reason)) {
+        spdlog::warn("[Call] Session={} reaped without DISCONNECTED callback: {}", session_id_,
+                     reason);
     }
 }
 
@@ -134,25 +170,7 @@ void VoicebotCall::onCallState(pj::OnCallStateParam& prm)
                  ci.lastReason);
 
     if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
-        std::string ignored;
-        stopRecording(&ignored);
-        endAiSession();
-
-        {
-            std::lock_guard<std::recursive_mutex> lock(media_mutex_);
-            announcement_player_.reset();
-        }
-
-        // [Step 3] Heartbeat 중지
-        stopLeaseHeartbeat();
-
-        // [Phase 2] Slot 반환
-        if (!service_name_.empty() && !slot_id_.empty()) {
-            CapacityManager::getInstance().releaseSlot(service_name_, slot_id_);
-        }
-
-        // [Safety] CDR 로그 기록 및 SessionManager 제거를 객체 생존 보장 하에 수행
-        dumpCdr(ci.lastReason);
+        finalizeLifecycle(ci.lastReason);
         
         // SessionManager에서 제거 (zombies_로 이동하여 30초 생존 연장)
         SessionManager::getInstance().removeCall(session_id_);
@@ -641,16 +659,16 @@ bool VoicebotCall::stopRecording(std::string* error_message)
 {
     ensurePjThreadRegistered("vbgw_call_api");
     std::lock_guard<std::recursive_mutex> lock(media_mutex_);
+
+    if (!recorder_) {
+        recording_active_ = false;
+        return true;
+    }
+
     try {
         if (primary_audio_media_index_ >= 0) {
             auto audio = getAudioMedia(primary_audio_media_index_);
-            if (recorder_) {
-                audio.stopTransmit(*recorder_);
-            }
-            if (media_port_) {
-                audio.stopTransmit(*media_port_);
-                media_port_->stopTransmit(audio);
-            }
+            audio.stopTransmit(*recorder_);
         }
     } catch (const pj::Error& e) {
         if (error_message) {
@@ -769,7 +787,7 @@ bool VoicebotCall::bridgeWith(const std::shared_ptr<VoicebotCall>& other,
         this_idx = primary_audio_media_index_;
     }
     {
-        std::lock_guard<std::mutex> lock(other->media_mutex_);
+        std::lock_guard<std::recursive_mutex> lock(other->media_mutex_);
         other_idx = other->primary_audio_media_index_;
     }
     if (this_idx < 0 || other_idx < 0) {
@@ -826,7 +844,7 @@ bool VoicebotCall::unbridgeWith(const std::shared_ptr<VoicebotCall>& other,
         this_idx = primary_audio_media_index_;
     }
     {
-        std::lock_guard<std::mutex> lock(other->media_mutex_);
+        std::lock_guard<std::recursive_mutex> lock(other->media_mutex_);
         other_idx = other->primary_audio_media_index_;
     }
     if (this_idx < 0 || other_idx < 0) {

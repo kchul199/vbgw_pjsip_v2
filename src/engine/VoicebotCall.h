@@ -65,6 +65,8 @@ public:
     std::string getRouteType() const { return route_type_; }
     std::string getSlotId() const { return slot_id_; }
     std::string getSessionId() const { return session_id_; }
+    int getInitialCallId() const { return initial_call_id_; }
+    void reapWithoutDisconnect(const std::string& reason);
 
     // [R-3 Fix] Graceful Shutdown 시 AI 세션 명시적 종료
 
@@ -99,6 +101,7 @@ private:
     bool recording_active_ = false;
     std::string recording_file_path_;
     int primary_audio_media_index_ = -1;
+    int initial_call_id_ = PJSUA_INVALID_ID;
 
     // [M-9 Fix] UUID 기반 세션 ID — 분산 환경에서 로그 추적 가능
     std::string session_id_;
@@ -125,10 +128,12 @@ private:
     std::atomic<int> vad_trigger_count_{0};
     std::atomic<int> bargein_count_{0};
     std::atomic<int> turn_count_{0}; // [Step 5] Turn Capping용
+    std::atomic<bool> lifecycle_finalized_{false};
 
     static bool isValidDtmfDigits(const std::string& digits);
     static bool isValidTransferTarget(const std::string& target_uri);
     bool startRecordingLocked(const std::string& file_path, std::string* error_message);
+    bool finalizeLifecycle(const std::string& reason);
     void dumpCdr(const std::string& reason);
 
     // [Step 3] Redis Lease Heartbeat

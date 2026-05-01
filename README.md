@@ -81,6 +81,20 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j4
 ```
 
+### 고동시성 SIP 부하 테스트 전 필수 확인
+
+Homebrew의 기본 `pjproject` 패키지는 이 환경에서 컴파일타임 `PJSUA_MAX_CALLS=4`로 빌드되어 있을 수 있습니다. 이 경우 `MAX_CONCURRENT_CALLS=1000`을 설정해도 실제 SIP call slot은 4개로 제한됩니다.
+
+`10 CPS` 이상의 부하 테스트나 `4`를 넘는 동시호 검증이 필요하면 아래 순서로 워크스페이스 안에 커스텀 PJPROJECT를 다시 빌드하십시오.
+
+```bash
+./scripts/build_local_pjproject.sh
+BUILD_DIR=build-local ./scripts/configure_with_local_pjproject.sh -DCMAKE_BUILD_TYPE=Release
+cmake --build build-local
+```
+
+기본 커스텀 빌드는 `PJSUA_MAX_CALLS=256`, `PJSUA_MAX_CONF_PORTS=1024`, `PJSIP_MAX_TSX_COUNT=4095`를 사용합니다. 필요하면 `PJ_MAX_CALLS`, `PJ_MAX_CONF_PORTS`, `PJ_MAX_TSX_COUNT` 환경변수로 조정할 수 있습니다.
+
 ---
 
 ## 5. 실행 및 테스트 (Execution & Testing)

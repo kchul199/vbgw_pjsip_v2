@@ -11,13 +11,12 @@ SessionManager& SessionManager::getInstance() {
 
 SessionManager::SessionManager() : max_calls_(AppConfig::instance().max_concurrent_calls) {
     try {
-        // Simple Redis connection based on env or config
-        const char* redis_url = std::getenv("REDIS_URL");
-        if (redis_url) {
-            redis_ = std::make_unique<sw::redis::Redis>(redis_url);
-            spdlog::info("[SessionManager] Connected to Redis at {}", redis_url);
+        const auto& cfg = AppConfig::instance();
+        if (!cfg.redis_addr.empty()) {
+            redis_ = std::make_unique<sw::redis::Redis>(cfg.redis_addr);
+            spdlog::info("[SessionManager] Connected to Redis at {}", cfg.redis_addr);
         } else {
-            spdlog::warn("[SessionManager] REDIS_URL not set, distributed session tracking disabled.");
+            spdlog::warn("[SessionManager] Redis address not configured, distributed session tracking disabled.");
         }
     } catch (const std::exception& e) {
         spdlog::error("[SessionManager] Failed to connect to Redis: {}", e.what());
@@ -92,6 +91,38 @@ void SessionManager::removeCall(const std::string& session_id) {
     }
 }
 
+std::shared_ptr<VoicebotCall> SessionManager::takeCallByPjsipId(int pjsip_call_id,
+                                                                std::string* session_id) {
+    std::shared_ptr<VoicebotCall> extracted;
+    std::vector<std::shared_ptr<VoicebotCall>> to_delete;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = calls_.begin(); it != calls_.end(); ++it) {
+            if (!it->second || it->second->getInitialCallId() != pjsip_call_id) {
+                continue;
+            }
+
+            if (session_id) {
+                *session_id = it->first;
+            }
+            extracted = std::move(it->second);
+            zombies_.push_back({std::chrono::steady_clock::now(), extracted});
+            calls_.erase(it);
+            break;
+        }
+        to_delete = cleanupZombiesLocked();
+    }
+
+    if (extracted && redis_) {
+        try {
+            redis_->del("call:" + extracted->getSessionId());
+        } catch (...) {}
+    }
+
+    return extracted;
+}
+
 std::shared_ptr<VoicebotCall> SessionManager::getCall(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = calls_.find(session_id);
@@ -158,4 +189,5 @@ void SessionManager::endAllAiSessions() {
 void SessionManager::clearAllCalls() {
     std::lock_guard<std::mutex> lock(mutex_);
     calls_.clear();
+    zombies_.clear();
 }

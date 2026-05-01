@@ -36,6 +36,18 @@ brew update
 brew install cmake pjproject grpc protobuf openssl spdlog boost onnxruntime speexdsp
 ```
 
+주의:
+
+1. Homebrew 기본 `pjproject`는 환경에 따라 `PJSUA_MAX_CALLS=4`로 빌드되어 있을 수 있습니다.
+2. 그래서 초보자용 단건 테스트는 되더라도, `4`를 넘는 동시호 부하 테스트는 실패할 수 있습니다.
+3. 부하 테스트가 목표라면 먼저 아래 스크립트로 로컬 커스텀 PJPROJECT를 빌드하세요.
+
+```bash
+./scripts/build_local_pjproject.sh
+BUILD_DIR=build-local ./scripts/configure_with_local_pjproject.sh -DCMAKE_BUILD_TYPE=Release
+cmake --build build-local
+```
+
 ### 2.2 VAD 모델 확인
 
 ```bash

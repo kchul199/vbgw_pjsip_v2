@@ -17,6 +17,9 @@ public:
     VoicebotMediaPort();
     void setAiClient(std::shared_ptr<VoicebotAiClient> client);
     virtual ~VoicebotMediaPort();  // unique_ptr 소멸자는 cpp에서 완전 타입 필요
+    void quiesce();
+    void shutdown();
+    static void retire(std::unique_ptr<VoicebotMediaPort> port);
 
     // 수신 (Rx): PBX에서 보낸 사용자(고객) 음성이 들어오는 곳 -> STT 스트리밍용
     virtual void onFrameReceived(pj::MediaFrame& frame) override;
@@ -54,6 +57,8 @@ private:
 
     // [P2-2 Fix] AI 포워딩 일시정지 플래그
     std::atomic<bool> ai_paused_{false};
+    std::atomic<bool> shutting_down_{false};
+    std::atomic<bool> unregister_requested_{false};
 
     // Thread safety for ai_client_
     std::mutex client_mutex_;
