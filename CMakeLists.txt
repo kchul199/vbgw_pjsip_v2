@@ -1,15 +1,27 @@
 cmake_minimum_required(VERSION 3.15)
 project(VoicebotGateway VERSION 1.0.0 LANGUAGES CXX)
+set(CMAKE_PREFIX_PATH "/opt/homebrew" ${CMAKE_PREFIX_PATH})
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
+if(ENABLE_COVERAGE)
+    add_compile_options(--coverage)
+    add_link_options(--coverage)
+endif()
 
 # 1. 의존성 패키지 찾기
 find_package(PkgConfig REQUIRED)
 
 # PJSIP 찾기
 pkg_check_modules(PJPROJECT REQUIRED libpjproject)
+
+# Monitoring dependencies
+find_package(prometheus-cpp REQUIRED)
+find_package(opentelemetry-cpp REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 # ── Unified OpenSSL Enforcement ──
 # 모든 라이브러리가 동일한 시스템 OpenSSL을 사용하도록 강제하여 gRPC(BoringSSL)와의 충돌 방지
@@ -78,13 +90,18 @@ add_library(vbgw_lib STATIC
     src/engine/RoutingEngine.cpp
     src/engine/CapacityManager.cpp
     src/engine/AccountManager.cpp
+    src/engine/SessionManager.cpp
     src/ai/VoicebotAiClient.cpp
     src/ai/SileroVad.cpp
     src/ai/SpeexDsp.cpp
     src/ivr/IvrManager.cpp
     src/api/HttpServer.cpp
     src/utils/CdrWebhookClient.cpp
+    src/utils/vault_client.cpp
     ${PROTO_SRCS}
+    src/monitoring/metrics_exporter.cpp
+    src/monitoring/http_exporter.cpp
+    src/monitoring/otel_tracer.cpp
 )
 
 add_executable(vbgw src/main.cpp)
@@ -128,6 +145,12 @@ target_link_libraries(vbgw_lib PUBLIC
     ${ONNXRUNTIME_LIB}
     ${SPEEXDSP_LIB}
     spdlog::spdlog
+    prometheus-cpp::core
+    prometheus-cpp::pull
+    opentelemetry-cpp::api
+    opentelemetry-cpp::sdk
+    opentelemetry-cpp::ostream_span_exporter
+    nlohmann_json::nlohmann_json
 )
 
 # ------------------------------------------------------------------------------
@@ -190,7 +213,9 @@ enable_testing()
 add_executable(test_vbgw
     tests/test_ringbuffer.cpp
     tests/test_runtime_metrics.cpp
+    tests/cpp/test_session_manager.cpp
 )
+set_target_properties(test_vbgw PROPERTIES LINK_FLAGS "${PJ_RAW_LDFLAGS}")
 target_link_libraries(test_vbgw PRIVATE vbgw_lib GTest::gtest_main)
 include(GoogleTest)
 gtest_discover_tests(test_vbgw DISCOVERY_TIMEOUT 30)

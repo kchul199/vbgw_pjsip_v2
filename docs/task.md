@@ -1,0 +1,30 @@
+- [ ] **스프린트 1**: GitHub Actions 설정 및 GoogleTest 프레임워크 구축
+  - [ ] `.github/workflows/build_test_deploy.yml` 파일 생성
+  - [ ] `tests/cpp/` 디렉터리 및 기본 GoogleTest 예제 추가
+- [x] **스프린트 2**: 관측성 구현
+  - [x] `src/monitoring/metrics_exporter.cpp/h` 파일 추가 (Prometheus exporter 기본 구현)
+  - [x] OpenTelemetry SDK 연동 코드 추가
+  - [x] Grafana 대시보드 JSON 템플릿 생성 (`helm/templates/grafana-dashboard.yaml`)
+- [x] **스프린트 3**: 보안 강화
+  - [x] SOPS 사용을 위한 `scripts/encrypt_config.sh` 및 복호화 스크립트 작성
+  - [x] Vault 연동 헬퍼 (`src/utils/vault_client.cpp/h`) 구현
+  - [x] TLS 1.3 설정 적용 (`src/engine/VoicebotEndpoint.cpp` 등)
+- [x] **스프린트 4**: 멀티‑인스턴스 설계 및 배포
+  - [x] `config/session.yaml` 생성 및 `max_concurrent_calls` 외부화
+  - [x] Redis 기반 세션 공유 로직 추가 (`src/engine/SessionManager.cpp/h`)
+  - [x] Helm 차트에 Deployment, HPA, Envoy 프록시 템플릿 추가
+- [x] **스프린트 5**: 테스트 커버리지 확대
+  - [x] 주요 모듈 (Engine, AiClient, MediaPort, SessionManager) 유닛 테스트 구현
+  - [x] Mock 객체 작성 (`tests/cpp/mocks/`)
+  - [x] CI에 커버리지 리포트 업로드 설정
+- [x] **스프린트 6**: 안정성 강화 및 세션 식별 체계 통합 (UUID)
+  - [x] `call_id`(int)를 `session_id`(UUID string)로 전면 교체 (SessionManager, HttpServer, VoicebotCall)
+  - [x] PJSIP 타이머 및 리소스 해제 레이스 컨디션 해결 (Zombie TTL 상향 및 타이머 명시적 취소)
+  - [x] SIPp 고부하 테스트(150 Concurrent)를 통한 Mutex stability 검증 완료
+  - [x] `scripts/doc_sync.py` 작성 (문서와 코드 매핑)
+  - [x] Mermaid 다이어그램 파일 (`docs/architecture.mmd`) 업데이트
+  - [x] Softphone 테스트 가이드 (`docs/softphone_test_guide.md`) 작성
+- [/] **스프린트 7**: 전체 검증 및 프로덕션 배포
+  - [ ] 스테이징 클러스터에 배포 후 모니터링 확인
+  - [ ] Softphone 실제 검증 수행 및 체크리스트 완료
+  - [ ] Helm 차트 프로덕션 배포 (`helm upgrade --install`)

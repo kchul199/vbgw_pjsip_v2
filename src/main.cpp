@@ -115,9 +115,6 @@ int main()
     // [Step 2] CDR Webhook 서비스 시작
     CdrWebhookClient::getInstance().start();
 
-    // [Step 4] PBX Active Probing 시작
-    AccountManager::getInstance().startProbing();
-
     spdlog::info("Starting AI Voicebot Gateway (PJSUA2)... [profile={}, log_level={}{}]",
                  cfg.runtime_profile, cfg.log_level,
                  cfg.log_dir.empty() ? "" : std::string(", log_dir=") + cfg.log_dir);
@@ -272,6 +269,9 @@ int main()
     if (!HttpServer::getInstance().start(cfg.http_port)) {
         spdlog::error("[VBGW] Failed to start HTTP Admin Server on port {}", cfg.http_port);
     }
+
+    // [Step 4] PBX Active Probing 시작 — PJSIP 초기화 및 계정 등록 후 시작 필수
+    AccountManager::getInstance().startProbing();
 
     spdlog::info("Press Ctrl+C to stop the gateway gracefully.");
 

@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <pjlib.h>
 #include <pjsua.h>
+#include "../utils/PjThreadHelper.h"
 
 AccountManager::~AccountManager() {
     stopProbing();
@@ -22,12 +23,7 @@ void AccountManager::stopProbing() {
 }
 
 void AccountManager::probingLoop() {
-    // PJSIP 스레드 등록
-    pj_thread_desc desc;
-    pj_thread_t* thread = nullptr;
-    if (!pj_thread_is_registered()) {
-        pj_thread_register("vbgw_probing", desc, &thread);
-    }
+    vbgw::utils::PjThreadHelper::registerThread("vbgw_probing");
 
     while (!stop_probing_) {
         std::vector<std::pair<std::string, std::shared_ptr<VoicebotAccount>>> targets;

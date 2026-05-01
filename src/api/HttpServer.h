@@ -57,17 +57,17 @@ private:
     std::string handleListSessions(const std::string& admin_key, const std::string& remote_ip) const;
     std::string handleOutboundCall(const std::string& json_body, const std::string& admin_key,
                                    const std::string& remote_ip) const;
-    std::string handleCallDtmf(int call_id, const std::string& json_body,
+    std::string handleCallDtmf(const std::string& session_id, const std::string& json_body,
                                const std::string& admin_key, const std::string& remote_ip) const;
-    std::string handleCallTransfer(int call_id, const std::string& json_body,
+    std::string handleCallTransfer(const std::string& session_id, const std::string& json_body,
                                    const std::string& admin_key,
                                    const std::string& remote_ip) const;
-    std::string handleCallStats(int call_id, const std::string& admin_key,
+    std::string handleCallStats(const std::string& session_id, const std::string& admin_key,
                                 const std::string& remote_ip) const;
-    std::string handleCallRecordStart(int call_id, const std::string& json_body,
+    std::string handleCallRecordStart(const std::string& session_id, const std::string& json_body,
                                       const std::string& admin_key,
                                       const std::string& remote_ip) const;
-    std::string handleCallRecordStop(int call_id, const std::string& admin_key,
+    std::string handleCallRecordStop(const std::string& session_id, const std::string& admin_key,
                                      const std::string& remote_ip) const;
     std::string handleBridgeCalls(const std::string& json_body, const std::string& admin_key,
                                   const std::string& remote_ip, bool unbridge) const;

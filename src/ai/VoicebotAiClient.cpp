@@ -2,6 +2,7 @@
 
 #include "../utils/AppConfig.h"
 #include "../utils/RuntimeMetrics.h"
+#include "../utils/PjThreadHelper.h"
 
 #include <spdlog/spdlog.h>
 
@@ -226,6 +227,7 @@ void VoicebotAiClient::sendDtmf(const std::string& digit)
 
 void VoicebotAiClient::streamWorker()
 {
+    vbgw::utils::PjThreadHelper::registerThread("streamWorker");
     while (is_running_.load(std::memory_order_acquire)) {
         AudioItem item;
         {
@@ -273,6 +275,10 @@ void VoicebotAiClient::streamWorker()
                 if (context_)
                     context_->TryCancel();
             }
+            if (!local_stream->Write(chunk)) {
+                // Stream is broken. readWorker will reconnect. We sleep to avoid tight loop.
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
         }
     }
     spdlog::debug("[gRPC] streamWorker exited for session: {}", current_session_id_);
@@ -280,10 +286,13 @@ void VoicebotAiClient::streamWorker()
 
 void VoicebotAiClient::endSession()
 {
-    // 이미 정지된 상태라면 중복 수행 방지
-    bool expected = true;
-    if (!is_running_.compare_exchange_strong(expected, false, std::memory_order_acq_rel))
-        return;
+    is_running_.store(false, std::memory_order_release);
+    queue_cv_.notify_all();
+
+    bool expected = false;
+    if (!cleanup_done_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return; // Cleanup already performed
+    }
 
     setStreamState(StreamState::Closing, "end_session");
     queue_cv_.notify_all();
@@ -301,17 +310,19 @@ void VoicebotAiClient::endSession()
     }
 
     if (worker_thread_.joinable()) {
-        if (worker_thread_.get_id() == std::this_thread::get_id()) {
-            worker_thread_.detach();
-        } else {
+        if (worker_thread_.get_id() != std::this_thread::get_id()) {
             worker_thread_.join();
+        } else {
+            spdlog::critical("[gRPC] FATAL: endSession() called from streamWorker! Detaching.");
+            worker_thread_.detach();
         }
     }
     if (read_thread_.joinable()) {
-        if (read_thread_.get_id() == std::this_thread::get_id()) {
-            read_thread_.detach();
-        } else {
+        if (read_thread_.get_id() != std::this_thread::get_id()) {
             read_thread_.join();
+        } else {
+            spdlog::critical("[gRPC] FATAL: endSession() called from readWorker! Detaching.");
+            read_thread_.detach();
         }
     }
 
@@ -416,6 +427,7 @@ VoicebotAiClient::ReadOutcome VoicebotAiClient::tryConnectAndRead()
 
 void VoicebotAiClient::readWorker()
 {
+    vbgw::utils::PjThreadHelper::registerThread("readWorker");
     while (is_running_.load(std::memory_order_acquire)) {
         ReadOutcome outcome = tryConnectAndRead();
 

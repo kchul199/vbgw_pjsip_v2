@@ -2,6 +2,7 @@
 
 #include "../utils/AppConfig.h"
 #include "../utils/RuntimeMetrics.h"
+#include "../utils/PjThreadHelper.h"
 #include "SessionManager.h"
 #include "VoicebotCall.h"
 #include "RoutingEngine.h"
@@ -32,9 +33,8 @@ void handleAcceptedIncomingCall(VoicebotAccount* acc, OnIncomingCallParam& iprm,
 
     // [H-6 Fix] ANSWER_DELAY_MS를 AppConfig에서 캐싱된 값으로 읽기
     const int answer_delay_ms = AppConfig::instance().answer_delay_ms;
-    const int call_id = iprm.callId;
     {
-        acc->asyncAnswerCall(call, call_id, answer_delay_ms);
+        acc->asyncAnswerCall(call, call->getSessionId(), answer_delay_ms);
     }
 }
 }
@@ -89,7 +89,7 @@ void VoicebotAccount::onRegState(OnRegStateParam& prm)
     }
 }
 
-void VoicebotAccount::asyncAnswerCall(std::shared_ptr<pj::Call> call, int call_id, int answer_delay_ms)
+void VoicebotAccount::asyncAnswerCall(std::shared_ptr<pj::Call> call, const std::string& session_id, int answer_delay_ms)
 {
     std::lock_guard<std::mutex> lock(futures_mutex_);
 
@@ -103,25 +103,22 @@ void VoicebotAccount::asyncAnswerCall(std::shared_ptr<pj::Call> call, int call_i
 
     // 200 OK 응답을 별도 스레드에서 비동기 처리
     answer_futures_.push_back(
-        std::async(std::launch::async, [this, call, call_id, answer_delay_ms]() {
-            thread_local pj_thread_desc thread_desc;
-            thread_local pj_thread_t* pj_thread = nullptr;
-            if (!pj_thread_is_registered()) {
-                pj_thread_register("vbgw_answer", thread_desc, &pj_thread);
-            }
+        std::async(std::launch::async, [this, call, session_id, answer_delay_ms]() {
+            vbgw::utils::PjThreadHelper::registerThread("vbgw_answer");
 
             std::this_thread::sleep_for(std::chrono::milliseconds(answer_delay_ms));
             try {
                 pj::CallOpParam ok_prm;
                 ok_prm.statusCode = PJSIP_SC_OK;
                 call->answer(ok_prm);
-                spdlog::info("[Account] Sent 200 OK for Call-ID: {}", call_id);
-            } catch (Error& err) {
-                spdlog::error("[Account] Failed to answer call {}: {}", call_id, err.info());
-                SessionManager::getInstance().removeCall(call_id);
+                spdlog::info("[Account] Sent 200 OK for Session: {}", session_id);
+            } catch (pj::Error& e) {
+                spdlog::warn("[Account] Delay-Answer failed. Releasing Session={}. reason: {}",
+                             session_id, e.info());
+                SessionManager::getInstance().removeCall(session_id);
             } catch (...) {
-                spdlog::error("[Account] Unknown error answering call {}", call_id);
-                SessionManager::getInstance().removeCall(call_id);
+                spdlog::error("[Account] Unknown error answering call {}", session_id);
+                SessionManager::getInstance().removeCall(session_id);
             }
         }));
 }
@@ -205,10 +202,10 @@ void VoicebotAccount::onIncomingCall(OnIncomingCallParam& iprm)
         call->setRoutingInfo(route.service_name, route.entry_number, route.route_type);
         call->setSlotId(lease.slot_id);
 
-        if (!SessionManager::getInstance().tryAddCall(iprm.callId, call)) {
+        if (!SessionManager::getInstance().tryAddCall(call->getSessionId(), call)) {
             CapacityManager::getInstance().releaseSlot(route.service_name, lease.slot_id);
             spdlog::warn("[Account] Max call limit reached. Rejecting call {} with 486 Busy Here.",
-                         iprm.callId);
+                         call->getSessionId());
             CallOpParam prm;
             prm.statusCode = PJSIP_SC_BUSY_HERE;
             try { call->hangup(prm); } catch(...) {}
@@ -221,15 +218,17 @@ void VoicebotAccount::onIncomingCall(OnIncomingCallParam& iprm)
         spdlog::warn("[Account] No route matched for Dest: {}. Fallback to static.", destination_number);
         
         auto call = std::make_shared<VoicebotCall>(*this, iprm.callId);
-        if (!SessionManager::getInstance().tryAddCall(iprm.callId, call)) {
-            pjsua_call_answer2(iprm.callId, NULL, PJSIP_SC_BUSY_HERE, NULL, NULL);
+        if (!SessionManager::getInstance().tryAddCall(call->getSessionId(), call)) {
+            pj::CallOpParam prm;
+            prm.statusCode = PJSIP_SC_BUSY_HERE;
+            try { call->hangup(prm); } catch(...) {}
             return;
         }
         handleAcceptedIncomingCall(this, iprm, call);
     }
 }
 
-bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, int* out_call_id,
+bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, std::string* out_session_id,
                                        std::string* error_message)
 {
     std::lock_guard<std::mutex> lock(outbound_mutex_);
@@ -243,11 +242,7 @@ bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, int* out_c
     }
 
     // 외부 스레드(HTTP worker)에서 PJSIP API 호출 시 스레드 등록 필요
-    thread_local pj_thread_desc thread_desc;
-    thread_local pj_thread_t* pj_thread = nullptr;
-    if (!pj_thread_is_registered()) {
-        pj_thread_register("vbgw_outbound", thread_desc, &pj_thread);
-    }
+    vbgw::utils::PjThreadHelper::registerThread("vbgw_outbound");
 
     auto call = std::make_shared<VoicebotCall>(*this);
     int call_id = PJSUA_INVALID_ID;
@@ -268,7 +263,7 @@ bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, int* out_c
             return false;
         }
 
-        if (!SessionManager::getInstance().tryAddCall(call_id, call)) {
+        if (!SessionManager::getInstance().tryAddCall(call->getSessionId(), call)) {
             if (error_message) {
                 *error_message = "Maximum concurrent call limit reached after call allocation";
             }
@@ -286,8 +281,8 @@ bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, int* out_c
             return false;
         }
 
-        if (out_call_id) {
-            *out_call_id = call_id;
+        if (out_session_id) {
+            *out_session_id = call->getSessionId();
         }
 
         spdlog::info("[Account] Outbound SIP call initiated [call_id={}, target_uri={}]", call_id,
@@ -298,8 +293,8 @@ bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, int* out_c
             *error_message = err.info();
         }
         spdlog::error("[Account] Outbound call failed [target_uri={}]: {}", target_uri, err.info());
-        if (call_id != PJSUA_INVALID_ID) {
-            SessionManager::getInstance().removeCall(call_id);
+        if (call) {
+            SessionManager::getInstance().removeCall(call->getSessionId());
         }
         return false;
     } catch (const std::exception& e) {
@@ -308,8 +303,8 @@ bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, int* out_c
         }
         spdlog::error("[Account] Outbound call failed with std::exception [target_uri={}]: {}",
                       target_uri, e.what());
-        if (call_id != PJSUA_INVALID_ID) {
-            SessionManager::getInstance().removeCall(call_id);
+        if (call) {
+            SessionManager::getInstance().removeCall(call->getSessionId());
         }
         return false;
     } catch (...) {
@@ -318,8 +313,8 @@ bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, int* out_c
         }
         spdlog::error("[Account] Outbound call failed with unknown error [target_uri={}]",
                       target_uri);
-        if (call_id != PJSUA_INVALID_ID) {
-            SessionManager::getInstance().removeCall(call_id);
+        if (call) {
+            SessionManager::getInstance().removeCall(call->getSessionId());
         }
         return false;
     }

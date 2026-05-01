@@ -29,6 +29,7 @@ bool VoicebotEndpoint::init()
         ep_cfg.logConfig.level = cfg.pjsip_log_level;
         ep_cfg.logConfig.consoleLevel = cfg.pjsip_log_level;
         ep_cfg.uaConfig.maxCalls = static_cast<unsigned>(cfg.max_concurrent_calls);
+        spdlog::info("[Endpoint] UA max calls set to: {}", ep_cfg.uaConfig.maxCalls);
 
         // STUN 서버 설정 (NAT traversal)
         if (!cfg.sip_stun_server.empty()) {
@@ -88,6 +89,9 @@ bool VoicebotEndpoint::start(int sip_port)
         if (!cfg.sip_tls_ca_file.empty()) {
             tls_tcfg.tlsConfig.CaListFile = cfg.sip_tls_ca_file;
         }
+        
+        // Force TLS 1.3
+        tls_tcfg.tlsConfig.proto = PJ_SSL_SOCK_PROTO_TLS1_3;
 
         bool started_any = false;
         if (cfg.sip_transport_udp_enable) {

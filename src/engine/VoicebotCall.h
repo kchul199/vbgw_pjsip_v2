@@ -95,7 +95,7 @@ private:
 
     // [H-1 Fix] ai_client_ 초기화 이중 진입 방지
     std::mutex ai_init_mutex_;
-    mutable std::mutex media_mutex_;
+    mutable std::recursive_mutex media_mutex_;
     bool recording_active_ = false;
     std::string recording_file_path_;
     int primary_audio_media_index_ = -1;
@@ -142,4 +142,7 @@ private:
     // [Step 5] AI Cushion Timer
     void onCushionTimeout(pj::TimerEvent& event);
     pj_timer_entry cushion_timer_;
+
+    // [Step 6] Media Object Lifecycle Management
+    std::unique_ptr<pj::AudioMediaPlayer> announcement_player_;
 };

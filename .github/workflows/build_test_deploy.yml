@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up C++ toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: gcc clang cmake make ninja
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: ${{ runner.os }}-cmake-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-
+
+      - name: Configure CMake
+        run: cmake -S . -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run Tests (with Coverage)
+        run: |
+          cd build
+          ctest --output-on-failure -j4
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v4
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          flags: unittests
+          name: codecov-coverage
+      - name: Build Docker image
+        run: |
+          docker build -t vbgw:latest .
+
+      - name: Push Docker image (optional)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+          docker tag vbgw:latest yourrepo/vbgw:latest
+          docker push yourrepo/vbgw:latest
+
+      - name: Deploy to Kubernetes (staging)
+        if: github.ref == 'refs/heads/main'
+        env:
+          KUBECONFIG: ${{ secrets.KUBECONFIG }}
+        run: |
+          helm upgrade --install vbgw charts/vbgw -f charts/vbgw/values.yaml --namespace staging

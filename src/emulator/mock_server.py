@@ -88,8 +88,8 @@ class VoicebotAiServiceServicer(voicebot_pb2_grpc.VoicebotAiServiceServicer):
 
 
 def serve():
-    # 최대 10개의 동시 통화를 에뮬레이트하는 서버스레드 풀
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    # 최대 200개의 동시 통화를 에뮬레이트하는 서버스레드 풀
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=200))
     voicebot_pb2_grpc.add_VoicebotAiServiceServicer_to_server(VoicebotAiServiceServicer(), server)
 
     # IPv6 bind 실패 환경(샌드박스/CI) 대응: IPv4 loopback으로 폴백

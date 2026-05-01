@@ -114,6 +114,7 @@ private:
     std::condition_variable queue_cv_;
 
     std::atomic<bool> is_running_;
+    std::atomic<bool> cleanup_done_{false};
     std::atomic<StreamState> state_{StreamState::Idle};
     std::thread worker_thread_;
     std::thread read_thread_;

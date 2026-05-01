@@ -16,7 +16,7 @@ public:
     virtual void onIncomingCall(pj::OnIncomingCallParam& iprm) override;
 
     // HTTP Admin API 등 외부 제어 경로에서 발신 콜 시작
-    bool makeOutboundCall(const std::string& target_uri, int* out_call_id = nullptr,
+    bool makeOutboundCall(const std::string& target_uri, std::string* out_session_id = nullptr,
                           std::string* error_message = nullptr);
 
     // [Shutdown Fix] PJSIP Account를 명시적으로 정리
@@ -25,7 +25,7 @@ public:
     void shutdown();
 
     // [Phase 2] 비동기 응답 처리 헬퍼
-    void asyncAnswerCall(std::shared_ptr<pj::Call> call, int call_id, int answer_delay_ms);
+    void asyncAnswerCall(std::shared_ptr<pj::Call> call, const std::string& session_id, int answer_delay_ms);
 
 private:
     // [C-3 Fix] detach() 대신 future 보관 — 소멸자에서 완료 보장

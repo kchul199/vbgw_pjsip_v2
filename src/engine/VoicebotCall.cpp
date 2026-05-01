@@ -10,6 +10,7 @@
 #include "VoicebotMediaPort.h"
 #include "CapacityManager.h"
 #include "../utils/CdrWebhookClient.h"
+#include "../utils/PjThreadHelper.h"
 
 #include <pjlib.h>
 #include <pjsua.h>
@@ -45,11 +46,7 @@ static std::string generateSessionId()
 
 void ensurePjThreadRegistered(const char* thread_name)
 {
-    thread_local pj_thread_desc thread_desc;
-    thread_local pj_thread_t* pj_thread = nullptr;
-    if (!pj_thread_is_registered()) {
-        pj_thread_register(thread_name, thread_desc, &pj_thread);
-    }
+    vbgw::utils::PjThreadHelper::registerThread(thread_name);
 }
 
 VoicebotCall::VoicebotCall(pj::Account& acc, int call_id)
@@ -70,15 +67,68 @@ VoicebotCall::VoicebotCall(pj::Account& acc, int call_id)
 
 VoicebotCall::~VoicebotCall()
 {
-    std::string ignored;
-    stopRecording(&ignored);
+    try {
+        // [Stability Fix] 타이머 명시적 취소
+        stopLeaseHeartbeat();
+        if (cushion_timer_.id != 0) {
+            try {
+                pj_timer_heap_cancel(pjsip_endpt_get_timer_heap(pjsua_get_pjsip_endpt()), &cushion_timer_);
+                cushion_timer_.id = 0;
+            } catch (...) {}
+        }
 
-    // ai_client_ endSession은 소멸자 호출 전 onCallState(DISCONNECTED)에서
-    // SessionManager::removeCall()을 통해 shared_ptr refcount가 0이 되면 자동 수행됨
+        // [P3-Safety] 모든 미디어 전송 명시적 중단 — PJSIP 미디어 스레드와의 경쟁 방지
+        try {
+            ensurePjThreadRegistered("vbgw_cleanup");
+            std::lock_guard<std::recursive_mutex> lock(media_mutex_);
+            
+            if (primary_audio_media_index_ >= 0) {
+                // getInfo()가 소멸 시점에 실패할 수 있으므로 try-catch
+                pj::CallInfo ci;
+                try { ci = getInfo(); } catch(...) { primary_audio_media_index_ = -1; }
+
+                if (primary_audio_media_index_ >= 0 && primary_audio_media_index_ < (int)ci.media.size() && ci.media[primary_audio_media_index_].type == PJMEDIA_TYPE_AUDIO) {
+                    try {
+                        auto audio = getAudioMedia(primary_audio_media_index_);
+                        if (recorder_) audio.stopTransmit(*recorder_);
+                        if (media_port_) {
+                            audio.stopTransmit(*media_port_);
+                            media_port_->stopTransmit(audio);
+                        }
+                        if (announcement_player_) audio.stopTransmit(*announcement_player_);
+                    } catch(...) {}
+                }
+            }
+        } catch (...) {}
+
+        // stopRecording()은 onCallState(DISCONNECTED)에서 이미 호출되었을 것이나, 
+        // 마지막 안전장치로 수행 (recursive_mutex로 변경했으므로 중복 락 안전)
+        std::string ignored;
+        stopRecording(&ignored);
+        
+        // [Safety] MediaPort 명시적 종료 (onFrameReceived가 더 이상 호출되지 않도록)
+        if (media_port_) {
+            media_port_->setAiClient(nullptr);
+        }
+    } catch (...) {
+        // Destructor must not throw
+    }
 }
 
 void VoicebotCall::onCallState(pj::OnCallStateParam& prm)
 {
+    // [Safety Fix] 콜백 실행 중 객체 소멸 방지
+    auto self = std::dynamic_pointer_cast<VoicebotCall>(SessionManager::getInstance().getCall(session_id_));
+    if (!self) {
+        // 이미 SessionManager에서 제거되었거나 (zombie 만료), 비정상적 호출
+        // PJSIP의 Call 객체는 살아있으므로 getInfo()는 가능
+        try {
+            pj::CallInfo ci = getInfo();
+            spdlog::debug("[Call] ID={} State={} (Self reference lost, skipping custom logic)", ci.id, ci.stateText);
+        } catch (...) {}
+        return;
+    }
+
     pj::CallInfo ci = getInfo();
     spdlog::info("[Call] ID={} Session={} State={} Reason={}", ci.id, session_id_, ci.stateText,
                  ci.lastReason);
@@ -88,18 +138,25 @@ void VoicebotCall::onCallState(pj::OnCallStateParam& prm)
         stopRecording(&ignored);
         endAiSession();
 
+        {
+            std::lock_guard<std::recursive_mutex> lock(media_mutex_);
+            announcement_player_.reset();
+        }
+
         // [Step 3] Heartbeat 중지
         stopLeaseHeartbeat();
 
         // [Phase 2] Slot 반환
-
         if (!service_name_.empty() && !slot_id_.empty()) {
             CapacityManager::getInstance().releaseSlot(service_name_, slot_id_);
         }
 
+        // [Safety] CDR 로그 기록 및 SessionManager 제거를 객체 생존 보장 하에 수행
         dumpCdr(ci.lastReason);
-        SessionManager::getInstance().removeCall(ci.id);
-        spdlog::info("[Call] ID={} Session={} Removed from SessionManager.", ci.id, session_id_);
+        
+        // SessionManager에서 제거 (zombies_로 이동하여 30초 생존 연장)
+        SessionManager::getInstance().removeCall(session_id_);
+        spdlog::info("[Call] ID={} Session={} Removed from SessionManager (Zombified).", ci.id, session_id_);
     }
 }
 
@@ -159,10 +216,12 @@ void VoicebotCall::onCallMediaState(pj::OnCallMediaStateParam& prm)
                     ai_client_->setTtsCallback([weak_self](const uint8_t* data, size_t len) {
                         if (auto self = weak_self.lock()) {
                             // [Step 5] TTS 수신 시 쿠션 타이머 중지
-                            if (self->cushion_timer_.id != 0) {
-                                pj_timer_heap_cancel(pjsip_endpt_get_timer_heap(pjsua_get_pjsip_endpt()), &self->cushion_timer_);
-                                self->cushion_timer_.id = 0;
-                            }
+                                if (self->cushion_timer_.id != 0) {
+                                    try {
+                                        pj_timer_heap_cancel(pjsip_endpt_get_timer_heap(pjsua_get_pjsip_endpt()), &self->cushion_timer_);
+                                        self->cushion_timer_.id = 0;
+                                    } catch(...) {}
+                                }
 
                             if (self->media_port_) {
                                 self->media_port_->writeTtsAudio(data, len);
@@ -251,7 +310,7 @@ void VoicebotCall::onCallMediaState(pj::OnCallMediaStateParam& prm)
         aud_med->startTransmit(*media_port_);
         media_port_->startTransmit(*aud_med);
         {
-            std::lock_guard<std::mutex> lock(media_mutex_);
+            std::lock_guard<std::recursive_mutex> lock(media_mutex_);
             primary_audio_media_index_ = static_cast<int>(i);
             if (cfg.call_recording_enable && !recording_active_) {
                 std::string rec_err;
@@ -402,9 +461,13 @@ bool VoicebotCall::playAnnouncement(const std::string& file_path, std::string* e
 {
     if (file_path.empty()) return false;
 
+    std::lock_guard<std::recursive_mutex> lock(media_mutex_);
     try {
-        pj::AudioMediaPlayer player;
-        player.createPlayer(file_path);
+        // 기존 플레이어가 있다면 중지 및 삭제
+        announcement_player_.reset();
+
+        announcement_player_ = std::make_unique<pj::AudioMediaPlayer>();
+        announcement_player_->createPlayer(file_path);
         
         // 메인 오디오 스트림에 연결
         pj::CallInfo ci = getInfo();
@@ -412,19 +475,17 @@ bool VoicebotCall::playAnnouncement(const std::string& file_path, std::string* e
             if (ci.media[i].type == PJMEDIA_TYPE_AUDIO) {
                 pj::AudioMedia* aud_med = dynamic_cast<pj::AudioMedia*>(getMedia(i));
                 if (aud_med) {
-                    player.startTransmit(*aud_med);
+                    announcement_player_->startTransmit(*aud_med);
                 }
             }
         }
-        
-        // PJSIP는 player가 스택에서 사라지면 정지됨.
-        // 실제로는 멤버 변수로 보관하거나 별도 수명 관리가 필요함.
-        // 여기서는 Step 4의 컨셉을 보여주는 수준으로 작성.
         
         spdlog::info("[Call] Session={} Playing announcement: {}", session_id_, file_path);
         return true;
     } catch (const pj::Error& e) {
         if (error_message) *error_message = e.info();
+        spdlog::error("[Call] Session={} Failed to play announcement {}: {}", session_id_, file_path, e.info());
+        announcement_player_.reset();
         return false;
     }
 }
@@ -572,22 +633,24 @@ bool VoicebotCall::startRecordingLocked(const std::string& file_path, std::strin
 bool VoicebotCall::startRecording(const std::string& file_path, std::string* error_message)
 {
     ensurePjThreadRegistered("vbgw_call_api");
-    std::lock_guard<std::mutex> lock(media_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(media_mutex_);
     return startRecordingLocked(file_path, error_message);
 }
 
 bool VoicebotCall::stopRecording(std::string* error_message)
 {
     ensurePjThreadRegistered("vbgw_call_api");
-    std::lock_guard<std::mutex> lock(media_mutex_);
-    if (!recording_active_) {
-        return true;
-    }
-
+    std::lock_guard<std::recursive_mutex> lock(media_mutex_);
     try {
-        if (recorder_ && primary_audio_media_index_ >= 0) {
+        if (primary_audio_media_index_ >= 0) {
             auto audio = getAudioMedia(primary_audio_media_index_);
-            audio.stopTransmit(*recorder_);
+            if (recorder_) {
+                audio.stopTransmit(*recorder_);
+            }
+            if (media_port_) {
+                audio.stopTransmit(*media_port_);
+                media_port_->stopTransmit(audio);
+            }
         }
     } catch (const pj::Error& e) {
         if (error_message) {
@@ -605,13 +668,13 @@ bool VoicebotCall::stopRecording(std::string* error_message)
 
 bool VoicebotCall::isRecording() const
 {
-    std::lock_guard<std::mutex> lock(media_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(media_mutex_);
     return recording_active_;
 }
 
 std::string VoicebotCall::recordingFilePath() const
 {
-    std::lock_guard<std::mutex> lock(media_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(media_mutex_);
     return recording_file_path_;
 }
 
@@ -630,7 +693,7 @@ bool VoicebotCall::getRtpStatsSnapshot(RtpStatsSnapshot* out, std::string* error
         const auto info = getInfo();
         int med_idx = -1;
         {
-            std::lock_guard<std::mutex> lock(media_mutex_);
+            std::lock_guard<std::recursive_mutex> lock(media_mutex_);
             med_idx = primary_audio_media_index_;
         }
         if (med_idx < 0 || med_idx >= static_cast<int>(info.media.size()) ||
@@ -702,7 +765,7 @@ bool VoicebotCall::bridgeWith(const std::shared_ptr<VoicebotCall>& other,
     int this_idx = -1;
     int other_idx = -1;
     {
-        std::lock_guard<std::mutex> lock(media_mutex_);
+        std::lock_guard<std::recursive_mutex> lock(media_mutex_);
         this_idx = primary_audio_media_index_;
     }
     {
@@ -759,7 +822,7 @@ bool VoicebotCall::unbridgeWith(const std::shared_ptr<VoicebotCall>& other,
     int this_idx = -1;
     int other_idx = -1;
     {
-        std::lock_guard<std::mutex> lock(media_mutex_);
+        std::lock_guard<std::recursive_mutex> lock(media_mutex_);
         this_idx = primary_audio_media_index_;
     }
     {
@@ -840,7 +903,15 @@ void VoicebotCall::stopLeaseHeartbeat()
 
 void VoicebotCall::onLeaseHeartbeat(pj::TimerEvent& event)
 {
+    ensurePjThreadRegistered("vbgw_heartbeat");
     PJ_UNUSED_ARG(event);
+
+    // [Safety Fix] SessionManager에서 활성 상태인지 확인 (Zombified 세션은 heartbeat 중단)
+    auto self = SessionManager::getInstance().getCall(session_id_);
+    if (!self) {
+        return;
+    }
+
     if (!slot_id_.empty()) {
         CapacityManager::getInstance().refreshLease(slot_id_);
         
@@ -852,6 +923,7 @@ void VoicebotCall::onLeaseHeartbeat(pj::TimerEvent& event)
 
 void VoicebotCall::onCushionTimeout(pj::TimerEvent& event)
 {
+    ensurePjThreadRegistered("vbgw_timer");
     PJ_UNUSED_ARG(event);
     spdlog::info("[Call] Session={} AI delay detected. Playing cushion message.", session_id_);
     // [Step 5] "잠시만 기다려주세요" 안내 멘트 재생
