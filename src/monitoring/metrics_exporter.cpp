@@ -1,3 +1,7 @@
+// prometheus-cpp Registry와 기본 metric family를 초기화하는 구현.
+//
+// 런타임 경로에서는 이미 생성된 Counter/Gauge 포인터만 재사용하므로,
+// 생성 비용과 이름 충돌 관리는 이 파일의 constructor에서 한 번에 처리한다.
 #include "metrics_exporter.h"
 
 #include <prometheus/counter.h>
@@ -13,6 +17,8 @@ MetricsExporter& MetricsExporter::instance() {
 }
 
 MetricsExporter::MetricsExporter() {
+    // Registry와 family를 constructor에서 모두 구성해두면
+    // 이후 호출자는 "메트릭 조회 후 값 변경"만 신경 쓰면 된다.
     registry_ = std::make_shared<prometheus::Registry>();
     // SIP sessions counter
     auto& sip_counter_family = prometheus::BuildCounter()

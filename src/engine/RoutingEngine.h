@@ -1,3 +1,7 @@
+// 대표번호/게이트웨이/서비스 매핑 규칙을 메모리에 적재하는 라우팅 엔진 인터페이스.
+//
+// 운영자는 config/routing.yaml을 수정하고, 개발자는 이 헤더가 정의한 구조체를 통해
+// YAML이 런타임 정책으로 어떻게 바뀌는지 이해하면 된다.
 #pragma once
 
 #include <string>
@@ -50,6 +54,10 @@ struct ResolvedRoute {
     ServiceCapacity capacity;
 };
 
+// 라우팅 규칙 전체를 보관하고 조회하는 싱글톤 엔진.
+//
+// resolveRoute()는 인입호가 들어올 때마다 호출되므로,
+// 여기서 반환하는 ResolvedRoute가 이후 CapacityManager와 VoicebotCall 생성의 입력이 된다.
 class RoutingEngine {
 public:
     static RoutingEngine& getInstance() {

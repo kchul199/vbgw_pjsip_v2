@@ -1,3 +1,8 @@
+// SIP 계정 이벤트에서 실제 VoicebotCall 생성과 라우팅/용량 정책을 연결하는 구현.
+//
+// 인입호 처리의 핵심 경로가 이 파일에 있다.
+// destination/source_gateway 추출 -> route resolve -> distributed lease ->
+// local session add -> 180/200 응답 순으로 진행된다고 보면 된다.
 #include "VoicebotAccount.h"
 
 #include "../utils/AppConfig.h"
@@ -18,7 +23,7 @@
 using namespace pj;
 
 namespace {
-// 중복 로직을 헬퍼 함수로 분리
+// 인입호 수락 후 공통으로 수행하는 "180 Ringing -> 지연 200 OK" 흐름을 묶는다.
 void handleAcceptedIncomingCall(VoicebotAccount* acc, OnIncomingCallParam& iprm, std::shared_ptr<VoicebotCall> call)
 {
     // 180 Ringing 전송 — PBX에 수신 알림
@@ -125,6 +130,8 @@ void VoicebotAccount::asyncAnswerCall(std::shared_ptr<pj::Call> call, const std:
 
 void VoicebotAccount::onIncomingCall(OnIncomingCallParam& iprm)
 {
+    // onIncomingCall()은 운영 정책이 가장 많이 들어가는 지점이다.
+    // 여기서 번호/게이트웨이를 해석하고, route와 capacity에 따라 수락/redirect/busy를 결정한다.
     // [Phase 0] destination_number 및 source_gateway 추출
     std::string destination_number;
     std::string source_gateway = "unknown"; // Default
@@ -240,6 +247,8 @@ void VoicebotAccount::onIncomingCall(OnIncomingCallParam& iprm)
 bool VoicebotAccount::makeOutboundCall(const std::string& target_uri, std::string* out_session_id,
                                        std::string* error_message)
 {
+    // outbound는 인입보다 단순하지만, 외부 스레드(HTTP worker)에서 들어오기 때문에
+    // PJSIP thread registration과 account-level 직렬화가 중요하다.
     std::lock_guard<std::mutex> lock(outbound_mutex_);
 
     if (!SessionManager::getInstance().canAcceptCall()) {

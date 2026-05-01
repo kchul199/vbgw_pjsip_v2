@@ -1,3 +1,13 @@
+// 통화 1건의 전체 수명주기를 구현하는 핵심 파일.
+//
+// 파일을 읽는 추천 순서:
+// 1. 생성자/소멸자/finalizeLifecycle()
+// 2. onCallState(), onCallMediaState()
+// 3. DTMF/transfer/recording/bridge API
+// 4. lease heartbeat, cushion timer, CDR
+//
+// 이렇게 읽으면 "통화가 생성되어 AI와 연결되고, 중간 제어를 거쳐, 종료 시 정리되는"
+// 전체 흐름이 자연스럽게 보인다.
 #include "VoicebotCall.h"
 
 #include "../ai/VoicebotAiClient.h"
@@ -28,6 +38,8 @@
 // 분산 환경에서 두 Gateway 인스턴스가 동시 시작해도 세션 ID 충돌 방지
 static std::string generateSessionId()
 {
+    // session_id는 PJSIP call slot과 독립적인 애플리케이션 레벨 식별자다.
+    // call slot은 재사용되지만 session_id는 한 통화 lifetime 동안 고유해야 한다.
     static thread_local std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFF);
 
@@ -116,6 +128,8 @@ VoicebotCall::~VoicebotCall()
 
 bool VoicebotCall::finalizeLifecycle(const std::string& reason)
 {
+    // 이 함수는 "한 통화를 끝낼 때 꼭 한 번만 해야 하는 정리"를 모아둔 곳이다.
+    // recording, AI session, media port quiesce, lease release, CDR까지 모두 여기서 마감한다.
     if (lifecycle_finalized_.exchange(true)) {
         return false;
     }
@@ -189,6 +203,8 @@ void VoicebotCall::onCallTsxState(pj::OnCallTsxStateParam& prm)
 
 void VoicebotCall::onCallMediaState(pj::OnCallMediaStateParam& prm)
 {
+    // media state는 실제 오디오 경로가 준비된 시점이다.
+    // 그래서 AI client 생성, media port 생성, recorder 시작, IVR 콜백 바인딩이 모두 여기서 이뤄진다.
     pj::CallInfo ci = getInfo();
     const auto& cfg = AppConfig::instance();
 
@@ -477,6 +493,8 @@ bool VoicebotCall::isValidTransferTarget(const std::string& target_uri)
 
 bool VoicebotCall::playAnnouncement(const std::string& file_path, std::string* error_message)
 {
+    // 안내 멘트는 별도 AudioMediaPlayer를 임시로 붙여 메인 오디오 스트림에 송신한다.
+    // 기존 플레이어가 있으면 교체해 중첩 재생으로 인한 혼선을 막는다.
     if (file_path.empty()) return false;
 
     std::lock_guard<std::recursive_mutex> lock(media_mutex_);
@@ -587,6 +605,8 @@ bool VoicebotCall::transferTo(const std::string& target_uri, std::string* error_
 
 bool VoicebotCall::startRecordingLocked(const std::string& file_path, std::string* error_message)
 {
+    // 녹취 파일 경로가 비어 있으면 세션 ID와 타임스탬프로 표준 파일명을 생성한다.
+    // 실제 PJSIP recorder attach는 primary audio media가 준비된 뒤에만 가능하다.
     if (recording_active_) {
         return true;
     }
@@ -765,6 +785,8 @@ bool VoicebotCall::getRtpStatsSnapshot(RtpStatsSnapshot* out, std::string* error
 bool VoicebotCall::bridgeWith(const std::shared_ptr<VoicebotCall>& other,
                               std::string* error_message)
 {
+    // bridge는 두 통화의 AudioMedia를 직접 연결하고, 그동안 AI 포워딩은 잠시 멈춘다.
+    // 즉 "상담원-고객 직접 통화"로 바뀌는 개념으로 이해하면 된다.
     if (!other) {
         if (error_message) {
             *error_message = "peer_call_not_found";
@@ -893,6 +915,8 @@ void VoicebotCall::endAiSession()
 
 void VoicebotCall::startLeaseHeartbeat()
 {
+    // 분산 슬롯은 TTL 기반이므로 통화가 살아 있는 동안 주기적으로 연장해야 한다.
+    // slot_id가 없다는 것은 이 통화가 분산 용량 제어 대상이 아니라는 뜻이다.
     if (slot_id_.empty()) return;
 
     pj_bzero(&lease_timer_, sizeof(lease_timer_));
@@ -950,6 +974,8 @@ void VoicebotCall::onCushionTimeout(pj::TimerEvent& event)
 
 void VoicebotCall::dumpCdr(const std::string& reason)
 {
+    // CDR은 로그용 문자열이면서 동시에 외부 webhook payload 원본이기도 하다.
+    // 운영/과금/사후 분석이 모두 이 정보에 기대므로 통화 종료 직전에 한 번 기록한다.
     auto end_time = std::chrono::system_clock::now();
     auto duration =
         std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time_).count();

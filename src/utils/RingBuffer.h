@@ -1,3 +1,7 @@
+// AI TTS 오디오를 임시 보관하는 바이트 단위 FIFO 버퍼.
+//
+// VoicebotMediaPort의 송신 경로에서 hot path로 사용되므로,
+// 구현은 단순하지만 wrap-around와 overwrite 정책을 명확히 이해하는 것이 중요하다.
 #pragma once
 #include <algorithm>
 #include <cstring>
@@ -7,6 +11,9 @@
 
 // Thread-safe RingBuffer (FIFO, Byte-level)
 // write/read는 두 번의 memcpy로 wrap-around를 처리하여 CPU 낭비 최소화
+//
+// 현재 정책은 "가득 찼을 때 가장 오래된 데이터를 버리고 최신 데이터를 유지"하는 형태다.
+// TTS 재생 버퍼 용도에서는 실시간성이 완전한 보존성보다 중요하므로 이 정책이 맞다.
 class RingBuffer
 {
 public:

@@ -1,3 +1,8 @@
+// HTTP Admin API의 공개 인터페이스를 정의한다.
+//
+// 이 파일이 담당하는 것은 "콜 처리" 자체가 아니라 "운영/제어 평면"이다.
+// 즉, SIP/RTP/gRPC 데이터 경로는 다른 모듈이 담당하고, 이 서버는
+// 현재 상태를 조회하거나 통화 중 제어 명령을 안전하게 주입하는 창구 역할을 한다.
 #pragma once
 
 #include <atomic>
@@ -18,6 +23,15 @@ class io_context;
 
 class VoicebotAccount;
 
+// Boost.Asio 기반의 경량 HTTP 관리 서버.
+//
+// 설계 포인트:
+// 1. 상태 조회(/live, /ready, /health, /metrics)
+// 2. 운영 제어(/api/v1/calls/*)
+// 3. 인증, 요청 제한, 감사 로그를 한곳에서 처리
+//
+// 이 클래스는 요청을 받아 SessionManager/VoicebotCall 쪽으로 위임만 하고,
+// 콜 상태를 직접 소유하지는 않는다.
 class HttpServer
 {
 public:

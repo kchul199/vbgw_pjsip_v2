@@ -1,3 +1,8 @@
+// CDR webhook 비동기 전송 구현.
+//
+// 설계 의도는 단순하다.
+// 1. 통화 종료 경로는 webhook 때문에 느려지면 안 된다.
+// 2. 외부 HTTP 전송 실패는 로그로 남기되 통화 처리를 되돌리지 않는다.
 #include "CdrWebhookClient.h"
 #include <curl/curl.h>
 #include <spdlog/spdlog.h>
@@ -46,6 +51,8 @@ void CdrWebhookClient::pushCdr(const std::string& url, const std::string& json_d
 }
 
 void CdrWebhookClient::workerLoop() {
+    // 단일 워커 스레드가 큐를 순서대로 비우며 전송한다.
+    // 이 방식은 단순하고 디버깅이 쉬우며, CDR 이벤트 순서도 자연스럽게 보존된다.
     while (true) {
         WebhookPayload payload;
         {

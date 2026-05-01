@@ -1,3 +1,11 @@
+// SIP/RTP 쪽에서 추출한 오디오를 AI 엔진으로 스트리밍하고,
+// AI 엔진이 반환한 TTS/STT/제어 이벤트를 다시 게이트웨이 내부 콜백으로 돌려주는
+// gRPC bi-directional streaming 클라이언트 인터페이스다.
+//
+// 읽을 때 핵심:
+// 1. write worker는 오디오/DTMF를 AI로 보낸다.
+// 2. read worker는 TTS, STT, END_OF_TURN을 받아 처리한다.
+// 3. 스트림 장애 시 재연결/백오프/에러 전파 책임도 이 클래스가 가진다.
 #pragma once
 #include "voicebot.grpc.pb.h"
 
@@ -13,6 +21,10 @@
 #include <thread>
 #include <vector>
 
+// 통화 1개와 1:1로 대응하는 AI 세션 클라이언트.
+//
+// VoicebotCall이 세션의 생명주기를 관리하고, VoicebotMediaPort가 오디오 프레임을
+// 공급하며, 이 클래스는 네트워크 스트림과 재연결 정책을 담당한다.
 class VoicebotAiClient
 {
 public:

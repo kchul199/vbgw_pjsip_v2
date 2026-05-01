@@ -1,3 +1,8 @@
+// Silero VAD ONNX 모델 래퍼의 공개 인터페이스.
+//
+// 이 클래스는 단순히 "음성이 있나?"만 판단하는 것이 아니라,
+// 프레임 누적, 모델 state 유지, 통화 간 state reset까지 함께 맡는다.
+// VoicebotMediaPort가 hot path에서 호출하므로 호출 비용과 스레드 안전이 중요하다.
 #pragma once
 #include <memory>
 #include <mutex>
@@ -5,6 +10,9 @@
 #include <vector>
 
 // Pimpl Idiom을 사용하여 ONNX 헤더 종속성을 캡슐화합니다.
+//
+// 호출자는 16kHz PCM을 넘기기만 하면 되고, ONNX Runtime 세부 구현은 이 클래스
+// 뒤에 숨겨진다. 모델 교체가 필요할 때도 외부 API는 가능한 한 유지하는 것이 목표다.
 class SileroVad
 {
 public:

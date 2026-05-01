@@ -1,3 +1,12 @@
+// VBGW와 AI 엔진 사이의 최소 계약(contract)을 정의하는 proto 파일이다.
+//
+// 이 파일을 읽을 때 핵심은 두 가지다.
+// 1. Gateway -> AI 로 어떤 실시간 이벤트를 보내는가
+// 2. AI -> Gateway 로 어떤 제어/오디오 응답을 기대하는가
+//
+// C++/Python mock/emulator가 모두 이 정의를 기준으로 동작하므로,
+// 필드를 추가하거나 enum을 바꾸면 VoicebotAiClient, mock_server.py,
+// 테스트 스크립트까지 함께 수정해야 한다.
 syntax = "proto3";
 
 package voicebot.ai;

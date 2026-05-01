@@ -1,3 +1,8 @@
+// main/standby SIP 계정의 health state와 선택 정책 구현.
+//
+// 현재 probing은 "등록 상태 기반의 단순 health 판단"에 가깝다.
+// 따라서 이 파일을 볼 때는 완전한 active probing 시스템이 아니라,
+// outbound account 선택을 위한 얇은 health layer로 이해하는 것이 맞다.
 #include "AccountManager.h"
 #include <spdlog/spdlog.h>
 #include <pjlib.h>
@@ -26,6 +31,8 @@ void AccountManager::probingLoop() {
     vbgw::utils::PjThreadHelper::registerThread("vbgw_probing");
 
     while (!stop_probing_) {
+        // accounts_ 락을 오래 잡지 않기 위해 snapshot을 만든 뒤,
+        // 실제 getInfo() 호출과 health 판정은 락 밖에서 진행한다.
         std::vector<std::pair<std::string, std::shared_ptr<VoicebotAccount>>> targets;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -61,6 +68,8 @@ void AccountManager::probingLoop() {
 }
 
 std::shared_ptr<VoicebotAccount> AccountManager::selectOutboundAccount() {
+    // 선택 정책은 단순하다.
+    // healthy한 main 우선, 그렇지 않으면 healthy한 standby, 마지막 fallback은 main/standby 순.
     auto main = getPrimaryAccount();
     auto standby = getStandbyAccount();
 

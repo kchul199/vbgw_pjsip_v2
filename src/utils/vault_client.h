@@ -1,3 +1,7 @@
+// HashiCorp Vault에서 secret을 읽어오는 간단한 클라이언트 인터페이스.
+//
+// 현재 프로젝트에서 넓게 쓰이고 있지는 않지만, 운영 환경에서 SIP/AI 자격증명을
+// 코드나 .env 대신 secret manager에서 가져오려는 확장 지점으로 볼 수 있다.
 #pragma once
 
 #include <string>

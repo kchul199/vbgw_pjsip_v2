@@ -1,3 +1,7 @@
+// 프로세스 내부의 활성 통화 세션을 추적하는 수명주기 관리자.
+//
+// CapacityManager가 "클러스터 전체" 용량을 본다면,
+// SessionManager는 "현재 프로세스"에서 어떤 VoicebotCall이 살아 있는지를 관리한다.
 #pragma once
 #include "../utils/AppConfig.h"
 #include "VoicebotCall.h"

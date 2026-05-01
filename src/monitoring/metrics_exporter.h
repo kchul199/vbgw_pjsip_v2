@@ -1,3 +1,7 @@
+// prometheus-cpp Registry와 주요 메트릭 family를 보관하는 인터페이스.
+//
+// RuntimeMetrics가 "애플리케이션 내부 상태"라면,
+// 이 파일은 "외부 Prometheus 라이브러리 객체"를 감싼다고 보면 된다.
 #pragma once
 
 #include <prometheus/counter.h>

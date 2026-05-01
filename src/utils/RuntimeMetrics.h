@@ -1,3 +1,8 @@
+// 프로세스 전역 런타임 메트릭 레지스트리.
+//
+// 이 파일은 모니터링 시스템의 외부 포맷(Prometheus) 자체를 직접 다루지 않고,
+// 우선 내부 카운터/게이지를 원자적으로 유지하는 데 초점을 둔다.
+// HttpServer가 이 값을 읽어 /health 와 /metrics 로 노출한다.
 #pragma once
 
 #include <atomic>
@@ -6,6 +11,11 @@
 
 // Process-wide runtime metrics registry.
 // Uses atomics only to keep hot-path updates lock-free.
+//
+// 설계 포인트:
+// 1. 미디어 hot path에서도 락 없이 빠르게 증가/감소할 수 있어야 함
+// 2. /health 와 /metrics 가 같은 내부 값에 기대도록 단일 저장소를 유지함
+// 3. 카운터 감소 시 underflow를 막기 위해 decrementWithFloor()를 공통 사용함
 class RuntimeMetrics
 {
 public:

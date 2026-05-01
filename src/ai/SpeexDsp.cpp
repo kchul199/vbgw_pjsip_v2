@@ -1,3 +1,8 @@
+// SpeexDSP 전처리의 실제 초기화와 프레임 처리 구현.
+//
+// 읽을 때는 "이 파일이 복잡한 DSP 알고리즘을 구현한다"기보다는,
+// 이미 제공되는 SpeexPreprocessState를 VBGW의 프레임 단위와 스레드 모델에 맞춰
+// 안전하게 감싸는 래퍼라고 이해하면 된다.
 #include "SpeexDsp.h"
 
 #include <spdlog/spdlog.h>
@@ -55,6 +60,8 @@ SpeexDsp::~SpeexDsp() = default;
 
 void SpeexDsp::process(int16_t* pcm_data, size_t sample_count)
 {
+    // Speex 전처리 상태는 고정 frame size로 초기화되므로,
+    // 다른 크기의 프레임을 억지로 넣지 않고 즉시 스킵하는 편이 안전하다.
     // 프레임 크기 불일치 — SpeexPreprocessState는 고정 크기를 요구
     if (static_cast<int>(sample_count) != frame_size_) {
         spdlog::warn("[SpeexDsp] Frame size mismatch: got {} samples, expected {} — skipping",
@@ -72,7 +79,8 @@ void SpeexDsp::process(int16_t* pcm_data, size_t sample_count)
         return;
     }
 
-    // speex_preprocess_run(): in-place 처리 (pcm_data 직접 수정)
+    // speex_preprocess_run()은 in-place 처리이므로 호출 이후 PCM 내용이 바뀐다.
+    // 이후 Silero VAD와 AI 전송은 "전처리된" 신호를 기준으로 진행된다.
     // 반환값: 1 = 음성 감지됨, 0 = 음성 없음 (우리는 SileroVad를 사용하므로 무시)
     speex_preprocess_run(pimpl_->state, reinterpret_cast<spx_int16_t*>(pcm_data));
 }

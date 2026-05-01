@@ -1,3 +1,7 @@
+// DTMF 기반 상태 전이 로직을 모아둔 IVR 상태머신 인터페이스.
+//
+// VoicebotCall이 SIP/PJSIP 관점의 통화를 담당한다면,
+// IvrManager는 "통화 중 사용자 입력이 무엇을 의미하는가"를 결정하는 계층이다.
 #pragma once
 #include <functional>
 #include <mutex>

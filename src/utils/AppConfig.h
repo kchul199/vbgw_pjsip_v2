@@ -1,3 +1,8 @@
+// 애플리케이션 전체 설정의 단일 진실 공급원(single source of truth).
+//
+// 모든 환경변수는 이 파일에서 1회 읽혀 캐싱되고,
+// production 보안 정책 검증과 gRPC 채널 생성까지 이 클래스가 함께 맡는다.
+// 설정을 추가하거나 기본값을 바꿀 때는 거의 항상 이 파일부터 수정한다.
 #pragma once
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/security/credentials.h>

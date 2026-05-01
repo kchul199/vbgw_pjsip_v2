@@ -1,3 +1,8 @@
+// SpeexDSP 기반 오디오 전처리 인터페이스.
+//
+// VBGW에서 이 계층은 "음성 인식 전에 신호를 다듬는 곳"으로 이해하면 된다.
+// 현재는 denoise + AGC만 제공하지만, 향후 NS/AGC/AEC 계열 전처리를 확장할 때도
+// VoicebotMediaPort는 이 추상화만 의존하도록 유지하는 것이 좋다.
 #pragma once
 #include <cstdint>
 #include <memory>

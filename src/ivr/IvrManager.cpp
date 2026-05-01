@@ -1,3 +1,8 @@
+// 통화 중 DTMF를 의미 있는 상태 전이로 바꾸는 IVR 상태머신 구현.
+//
+// 이 파일의 핵심은 복잡한 비즈니스 규칙보다도,
+// "상태 전이 도중 외부 콜백을 언제 호출해야 deadlock을 피할 수 있는가"에 있다.
+// 그래서 대부분의 콜백은 lock 밖으로 defer 해서 실행한다.
 #include "IvrManager.h"
 
 #include <spdlog/spdlog.h>
@@ -91,6 +96,8 @@ void IvrManager::handleDtmf(const std::string& digit)
     if (digit.empty())
         return;
 
+    // handleDtmf()는 "상태 결정"까지만 lock 안에서 수행하고,
+    // 실제 부작용(전환, AI 포워딩, 종료)은 lock 밖에서 실행한다.
     // [P1-Deadlock Fix] 콜백을 lock 밖에서 실행
     // state_mutex_ 보유 중 콜백 실행 시 PJSIP/SessionManager 뮤텍스와
     // 교차 잠금(Lock Ordering Inversion) 발생 가능

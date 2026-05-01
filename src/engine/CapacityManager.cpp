@@ -1,3 +1,8 @@
+// Redis 기반 분산 슬롯 lease의 실제 구현.
+//
+// 이 파일의 핵심은 "로컬 프로세스 카운트"가 아니라
+// "여러 VBGW 인스턴스가 하나의 서비스 용량을 공유할 때 중복 배정을 막는 방식"이다.
+// 그래서 lease/release/heartbeat/getActiveCount 모두 Redis key를 기준으로 동작한다.
 #include "CapacityManager.h"
 #include <spdlog/spdlog.h>
 #include <uuid/uuid.h> // 고유 slot_id 생성을 위해 uuid 사용 (시스템 라이브러리)
@@ -17,6 +22,9 @@ long long leaseNowSeconds() {
 }
 
 // Lua Script: Max Concurrent 체크 후 슬롯 할당 및 TTL 설정
+//
+// ZSET score를 expires_at으로 사용하면, 별도 sweep 없이도 stale slot을 주기적으로
+// 제거할 수 있고 active count 계산도 한 구조 위에서 수행할 수 있다.
 // KEYS[1]: vbgw:slots:{service_name} (ZSET, member=slot_id, score=expires_at_epoch_sec)
 // KEYS[2]: vbgw:lease:{slot_id} (STRING)
 // ARGV[1]: slot_id
@@ -59,7 +67,8 @@ bool CapacityManager::init(const std::string& redis_addr) {
 
 SlotLease CapacityManager::leaseSlot(const std::string& service_name, int max_concurrent) {
     if (!redis_) {
-        // Redis 미연결 시 로컬 폴백 (Phase 2 로직 유지)
+        // 현재 정책은 Redis가 분산 용량 제어의 전제라는 가정에 가깝다.
+        // 운영 요구가 fail-open이면 바로 이 분기부터 정책을 바꿔야 한다.
         spdlog::warn("[CapacityManager] Redis not connected. Fallback to fail-open or reject.");
         return {false, ""}; 
     }
@@ -117,6 +126,8 @@ void CapacityManager::refreshLease(const std::string& slot_id) {
     if (!redis_ || slot_id.empty()) return;
 
     try {
+        // heartbeat는 lease key 갱신과 ZSET score 갱신을 동시에 맞춰,
+        // active count와 실제 TTL 관점을 일관되게 유지한다.
         std::string lease_key = "vbgw:lease:" + slot_id;
         auto service_name = redis_->get(lease_key);
         if (!service_name) {

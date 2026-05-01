@@ -1,3 +1,8 @@
+// VBGW 프로세스의 부팅/종료 순서를 담고 있는 엔트리 포인트.
+//
+// 운영자가 장애를 추적할 때는 "무엇이 먼저 올라오고 무엇이 마지막에 내려가는가"를,
+// 개발자가 기능을 붙일 때는 "새 전역 서비스가 어느 단계에서 초기화되어야 하는가"를
+// 이 파일에서 판단하면 된다.
 #include "api/HttpServer.h"
 #include "engine/SessionManager.h"
 #include "engine/VoicebotAccount.h"
@@ -69,6 +74,7 @@ static pjsua_sip_timer_use parseSessionTimerMode(const std::string& mode_raw)
 
 int main()
 {
+    // 1) 가장 먼저 종료 시그널을 잡아, 이후 어느 단계에서든 graceful shutdown이 가능하게 한다.
     // [CR-2 Fix] signal() → sigaction() 전환
     // signal()은 POSIX에서 동작이 구현체 의존(UB)이며,
     // 핸들러 실행 중 동일 시그널 재수신 시 경쟁 조건 발생
@@ -79,10 +85,11 @@ int main()
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
 
-    // [H-6 Fix] AppConfig 싱글톤 초기화 — 모든 환경변수를 1회 읽어 캐싱
+    // 2) AppConfig는 이후 모든 초기화 단계가 참조하는 설정 스냅샷이다.
+    // 프로세스 전체에서 환경변수를 반복 조회하지 않도록 여기서 캐싱한다.
     const auto& cfg = AppConfig::instance();
 
-    // [Phase 0] RoutingEngine 초기화
+    // 3) 인입호 처리 전에 라우팅과 분산 용량 계층을 준비한다.
     RoutingEngine::getInstance().loadConfig(cfg.routing_config_path);
 
     // [Step 3] CapacityManager (Redis) 초기화
@@ -90,7 +97,7 @@ int main()
         spdlog::warn("[VBGW] Redis initialization failed. Using local fallback (Phase 2 mode).");
     }
 
-    // [O4-1] 멀티싱크 로거: 콘솔 + 파일 (LOG_DIR 환경변수 설정 시 활성)
+    // 4) 로거를 초기에 고정해두면 이후 모든 부팅 로그가 동일한 sink/포맷을 사용한다.
     // 파일 로그: 10MB 롤링, 최대 5개 보관
     auto log_level = spdlog::level::from_str(cfg.log_level);
 
@@ -112,13 +119,15 @@ int main()
     logger->set_level(log_level);
     spdlog::set_default_logger(logger);
 
-    // [Step 2] CDR Webhook 서비스 시작
+    // 5) CDR Webhook 워커는 통화 종료 직후 바로 사용할 수 있어야 하므로 미리 시작한다.
     CdrWebhookClient::getInstance().start();
 
     spdlog::info("Starting AI Voicebot Gateway (PJSUA2)... [profile={}, log_level={}{}]",
                  cfg.runtime_profile, cfg.log_level,
                  cfg.log_dir.empty() ? "" : std::string(", log_dir=") + cfg.log_dir);
 
+    // 6) production 프로파일에서는 시작 직후 보안 정책을 강제 검증해
+    // 잘못된 설정을 통화 중이 아니라 부팅 단계에서 차단한다.
     std::vector<std::string> security_errors;
     if (!cfg.validateRuntimeSecurityPolicy(&security_errors)) {
         spdlog::critical("[Security] Runtime security policy validation failed:");
@@ -128,13 +137,14 @@ int main()
         return 2;
     }
 
+    // 7) SIP endpoint가 살아야 account와 call이 생성될 수 있으므로 가장 먼저 올린다.
     VoicebotEndpoint ep;
     if (!ep.init()) {
         spdlog::critical("Initialization failed. Aborting.");
         return 1;
     }
 
-    // [E-4 Fix] 광대역 HD Voice 코덱(Opus, G.722) 우선순위 상향
+    // 8) endpoint 초기화 후 코덱 우선순위를 조정해 향후 통화 협상 기본값을 맞춘다.
     try {
         ep.setCodecPriority("opus/48000/2", 255);
         ep.setCodecPriority("opus/48000/1", 254);

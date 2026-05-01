@@ -1,3 +1,7 @@
+// Redis 기반 분산 용량 제어 인터페이스.
+//
+// 이 파일은 "같은 서비스에 대해 여러 VBGW 인스턴스가 동시에 몇 콜까지 받을 수 있는가"
+// 를 조정하는 레이어다. 로컬 프로세스 상한(SessionManager)과는 다른 책임이다.
 #pragma once
 
 #include <string>

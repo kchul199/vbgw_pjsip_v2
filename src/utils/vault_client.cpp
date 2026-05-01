@@ -1,3 +1,7 @@
+// Vault KV v2 API에서 secret을 읽는 최소 구현.
+//
+// 현재 프로젝트의 주 경로는 아니지만, 운영 환경에서 자격증명을 파일 대신
+// secret manager로 옮기려 할 때 가장 먼저 확장될 파일이다.
 #include "vault_client.h"
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -16,6 +20,8 @@ VaultClient::VaultClient(const std::string& vault_addr, const std::string& vault
 }
 
 std::optional<std::string> VaultClient::GetSecret(const std::string& secret_path, const std::string& key) {
+    // 이 함수는 예외를 밖으로 던지기보다 nullopt를 반환해,
+    // 호출자가 fallback(.env 사용, 재시도, 즉시 실패 등)을 선택하게 한다.
     if (vault_addr_.empty() || vault_token_.empty()) {
         spdlog::warn("Vault address or token is empty");
         return std::nullopt;

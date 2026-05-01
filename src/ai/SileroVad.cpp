@@ -1,3 +1,8 @@
+// Silero VAD ONNX 모델을 실제로 호출하는 구현 파일.
+//
+// 이 파일의 핵심은 모델 API 자체보다 "프레임 누적 방식"과 "state reset 시점"이다.
+// 통화 중에는 20ms 조각이 들어오지만 모델은 512샘플 단위로 추론하므로,
+// 입력 버퍼링 로직을 이해해야 VAD 오동작을 디버깅할 수 있다.
 #include "SileroVad.h"
 
 #include "../utils/RuntimeMetrics.h"
@@ -61,6 +66,7 @@ SileroVad::~SileroVad() = default;
 
 void SileroVad::resetState()
 {
+    // 통화가 바뀌거나 barge-in으로 흐름을 끊을 때는 모델 state와 누적 PCM을 함께 비운다.
     // [M-5 Fix] resetState()도 mutex 보호 — 통화 종료/재시작 경합 방지
     std::lock_guard<std::mutex> lock(vad_mutex_);
     pimpl_->resetStates();
@@ -91,6 +97,8 @@ bool SileroVad::isSpeakingImpl(const int16_t* data, size_t count, float threshol
     // vad_mutex_ 보유 가정
     const bool prev_state = last_speaking_state_;
 
+    // 입력 버퍼는 "조금씩 쌓아 512샘플 단위로 소비"하는 구조다.
+    // 실시간 경로에서 무한히 커지지 않도록 상한을 두고, 초과 시 경고 후 초기화한다.
     // [P-2 Fix] pcm_buffer_ 무한 성장 방지 — 최대 16384 샘플(1초 분량) 상한
     static constexpr size_t kMaxPcmBufferSize = 16384;
     if (pcm_buffer_.size() + count > kMaxPcmBufferSize) {
@@ -109,7 +117,7 @@ bool SileroVad::isSpeakingImpl(const int16_t* data, size_t count, float threshol
 
     pcm_buffer_.insert(pcm_buffer_.end(), data, data + count);
 
-    // 512 샘플(32ms) 미만이면 마지막 상태 유지
+    // 아직 모델 추론에 필요한 최소 길이가 안 차면 이전 상태를 그대로 유지한다.
     if ((pcm_buffer_.size() - pcm_head_) < 512) {
         return last_speaking_state_;
     }

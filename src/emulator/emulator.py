@@ -1,3 +1,10 @@
+"""로컬 개발용 asyncio 기반 AI 에뮬레이터.
+
+이 에뮬레이터는 VBGW가 AI 서버와 양방향 스트리밍을 정상적으로 수행하는지
+사람이 눈으로 확인하기 쉽게 만든 도구다. 사용자 음성을 파일로 남기고,
+간단한 welcome TTS와 barge-in 반응을 돌려주면서 통화 흐름을 재현한다.
+"""
+
 import asyncio
 import os
 import time
@@ -14,6 +21,8 @@ class VoicebotAiEmulator(voicebot_pb2_grpc.VoicebotAiServiceServicer):
         self.tts_file = tts_file
 
     async def StreamSession(self, request_iterator, context):
+        # 스트림은 "사용자 입력을 계속 읽는 작업"과 "AI 응답을 내보내는 작업"이
+        # 동시에 일어나는 구조라서, 내부에서도 coroutine/task를 분리해 흉내 낸다.
         print("\n[Emulator] New Session Started.")
         session_id = "UNKNOWN"
         is_barged_in = False
@@ -54,7 +63,7 @@ class VoicebotAiEmulator(voicebot_pb2_grpc.VoicebotAiServiceServicer):
                 except Exception as e:
                     print(f"Failed to write audio: {e}")
 
-        # Start listening to user audio in the background
+        # 수신 쪽은 백그라운드 task로 돌려, 응답 생성과 병렬로 진행되게 만든다.
         read_task = asyncio.create_task(process_incoming())
 
         # Simulate initial AI processing delay (0.5s)
@@ -102,6 +111,7 @@ def create_dummy_wav(filename):
 
 
 async def serve():
+    # 샘플 TTS 파일이 없으면 즉석에서 더미 WAV를 만들어 바로 테스트 가능하게 한다.
     create_dummy_wav("sample_tts.wav")
 
     server = grpc.aio.server()

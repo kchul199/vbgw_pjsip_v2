@@ -1,3 +1,8 @@
+// YAML 라우팅 구성을 메모리 구조체로 적재하고 조회하는 구현.
+//
+// config/routing.yaml 문법이 실제 코드에서 어떻게 해석되는지 알고 싶다면
+// 가장 먼저 보는 파일이다. 운영자가 바꾸는 정적 설정이 런타임 정책으로
+// 매핑되는 과정이 이 안에 그대로 들어 있다.
 #include "RoutingEngine.h"
 #include <yaml-cpp/yaml.h>
 #include <spdlog/spdlog.h>
@@ -7,6 +12,8 @@
 bool RoutingEngine::loadConfig(const std::string& path) {
     std::lock_guard<std::mutex> lock(mutex_);
     try {
+        // 기존 services_를 직접 수정하지 않고 new_services를 만든 뒤 교체해,
+        // 중간 실패 시 이전 구성을 잃지 않게 한다.
         YAML::Node config = YAML::LoadFile(path);
         
         if (config["version"]) {
@@ -110,6 +117,8 @@ ResolvedRoute RoutingEngine::resolveRoute(const std::string& destination_number,
                                            const std::string& source_gateway) {
     std::lock_guard<std::mutex> lock(mutex_);
     
+    // 현재 구현은 단순 선형 탐색이지만, ruleset 크기가 크지 않은 운영 환경을 전제한다.
+    // 규칙이 많아지면 인덱스나 precompiled matcher 도입 지점이 바로 여기다.
     for (const auto& service : services_) {
         if (!service.enabled) continue;
 

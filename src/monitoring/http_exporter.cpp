@@ -1,3 +1,7 @@
+// prometheus-cpp Exposer를 실제로 여는 얇은 구현.
+//
+// 현재 VBGW의 주된 상태 노출은 HttpServer의 /metrics 이지만,
+// exporter를 분리하고 싶을 때 어디서 registry를 바인딩하는지 보여주는 예제 역할도 한다.
 #include "http_exporter.h"
 #include "metrics_exporter.h"
 #include <spdlog/spdlog.h>

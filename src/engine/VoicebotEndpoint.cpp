@@ -1,3 +1,8 @@
+// PJSIP endpoint와 transport 초기화의 실제 구현.
+//
+// 이 파일은 "SIP 스택을 어떻게 띄우는가"를 담당한다.
+// maxCalls, STUN, jitter buffer, null audio, UDP/TCP/TLS transport 선택 등
+// 통화가 생성되기 전에 결정되는 모든 SIP 런타임 기본값이 여기서 정해진다.
 #include "VoicebotEndpoint.h"
 
 #include "../utils/AppConfig.h"
@@ -23,6 +28,7 @@ bool VoicebotEndpoint::init()
     const auto& cfg = AppConfig::instance();
 
     try {
+        // libCreate -> EpConfig 조립 -> libInit 순서는 PJSUA2 초기화의 핵심 순서다.
         ep_->libCreate();
         EpConfig ep_cfg;
 
@@ -86,6 +92,8 @@ bool VoicebotEndpoint::start(int sip_port)
     const auto& cfg = AppConfig::instance();
 
     try {
+        // transport는 환경설정에 따라 여러 개를 동시에 열 수 있고,
+        // 나중에 account가 사용할 preferred transport를 따로 결정한다.
         TransportConfig base_tcfg;
         base_tcfg.port = sip_port;
 
@@ -187,6 +195,8 @@ bool VoicebotEndpoint::startTransport(pjsip_transport_type_e type, const pj::Tra
 
 void VoicebotEndpoint::choosePreferredTransport()
 {
+    // 사용자가 선호 transport를 지정했으면 최대한 따르고,
+    // 아니면 TLS -> TCP -> UDP 순으로 현실적인 fallback을 선택한다.
     const auto& cfg = AppConfig::instance();
     std::string pref = cfg.sip_transport_preferred;
     for (char& ch : pref) {

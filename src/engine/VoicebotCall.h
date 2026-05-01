@@ -1,3 +1,8 @@
+// 통화 1건의 오케스트레이션 책임을 선언하는 핵심 헤더.
+//
+// VBGW를 이해하려면 결국 이 클래스를 이해해야 한다.
+// SIP 상태, AI 세션, RTP media port, IVR, 녹취, bridge, CDR, lease heartbeat가
+// 모두 이 객체를 중심으로 엮여 있기 때문이다.
 #pragma once
 #include <pjsua2.hpp>
 
@@ -14,6 +19,9 @@ class IvrManager;
 
 // [M-1 Fix] enable_shared_from_this 상속 추가
 // 콜백 Lambda에서 this 대신 weak_from_this()를 사용하여 dangling pointer 방지
+//
+// 이 클래스는 PJSUA2의 pj::Call을 상속하지만, 동시에 C++ 객체 수명주기를 별도로
+// 관리해야 한다. 그래서 shared_ptr 기반 생명주기와 PJSIP 콜백 생명주기를 함께 본다.
 class VoicebotCall : public pj::Call, public std::enable_shared_from_this<VoicebotCall>
 {
 public:

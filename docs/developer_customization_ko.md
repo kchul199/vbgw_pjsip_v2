@@ -4,7 +4,7 @@
 
 - 대상: C++/SIP/gRPC 기반 백엔드 개발자, 콜플랫폼 엔지니어
 - 범위: 설정 설계, 코드 확장 포인트, API/메트릭 연동, 테스트/운영 반영
-- 비범위: 입문 설치/실행 튜토리얼 (초보자는 `docs/user_manual_ko.md` 먼저 권장)
+- 비범위: 설치/실행/운영 전반의 상세 절차 (먼저 `docs/user_manual_ko.md`와 `docs/operator_manual_ko.md` 권장)
 
 ---
 
@@ -308,7 +308,7 @@ bash tests/test_validate_prod_env.sh
 
 ## 11. 문서 간 역할 분리
 
-1. `docs/user_manual_ko.md`: 비개발자/초보자 실행 가이드
+1. `docs/user_manual_ko.md`: 소스 수정까지 포함한 상세 사용자·개발자 매뉴얼
 2. `docs/testing.md`: 테스트 시나리오 중심
 3. `docs/api_spec.md`: 메시지/제어 API 규약
 4. `docs/developer_customization_ko.md`(본 문서): 개발자 커스터마이징 기준

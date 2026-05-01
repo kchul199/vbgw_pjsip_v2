@@ -1,3 +1,7 @@
+// RTP <-> AI 오디오 경계에서 실제 프레임을 주고받는 AudioMediaPort 인터페이스.
+//
+// 쉽게 말해 이 클래스가 "전화망 오디오"를 "AI용 PCM 스트림"으로 바꾸고,
+// 반대로 "AI가 만든 TTS PCM"을 "전화망 재생 버퍼"로 돌려준다.
 #pragma once
 #include <pjsua2.hpp>
 
@@ -11,6 +15,12 @@ class RingBuffer;
 class SileroVad;
 class SpeexDsp;
 
+// 통화당 1개 생성되는 사용자 정의 AudioMediaPort.
+//
+// 읽을 때 핵심:
+// 1. onFrameReceived(): 고객 음성을 받아 전처리/VAD/AI 전송
+// 2. onFrameRequested(): AI TTS 버퍼를 읽어 PBX 쪽으로 송신
+// 3. quiesce/shutdown/retire(): PJSIP 비동기 unregister와 객체 수명 분리
 class VoicebotMediaPort : public pj::AudioMediaPort
 {
 public:

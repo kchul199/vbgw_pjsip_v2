@@ -1,3 +1,10 @@
+"""SIPp/E2E/부하 테스트용 동기식 mock AI 서버.
+
+이 파일은 실제 AI 품질보다 제어 흐름 검증에 초점을 둔다.
+VBGW가 VAD로 발화를 감지하면 clear_buffer를 보내고, 발화 종료 후에는
+STT/TTS/END_OF_TURN을 순서대로 반환해 게이트웨이의 반응을 확인한다.
+"""
+
 import logging
 import math
 import os
@@ -26,6 +33,9 @@ def generate_beep_audio(duration_sec=2.0, freq=440.0, sr=16000):
 
 class VoicebotAiServiceServicer(voicebot_pb2_grpc.VoicebotAiServiceServicer):
     def StreamSession(self, request_iterator, context):  # [C-8 Fix] proto 메서드명 일치
+        # 상태기계는 매우 단순하다.
+        # speaking=True 시작 -> barge-in flush
+        # speaking=False 전환 -> 발화 종료로 간주하고 모의 응답 생성
         logging.info("====================================")
         logging.info("[Gateway] New SIP Call connected to AI.")
 
@@ -89,7 +99,7 @@ class VoicebotAiServiceServicer(voicebot_pb2_grpc.VoicebotAiServiceServicer):
 
 
 def serve():
-    # 최대 200개의 동시 통화를 에뮬레이트하는 서버스레드 풀
+    # 부하 테스트에서 동시 세션이 많이 들어올 수 있으므로 워커 수를 넉넉히 둔다.
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=200))
     voicebot_pb2_grpc.add_VoicebotAiServiceServicer_to_server(VoicebotAiServiceServicer(), server)
 

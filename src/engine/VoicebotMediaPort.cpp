@@ -1,3 +1,8 @@
+// RTP 오디오와 AI PCM 스트림 사이를 실제로 잇는 AudioMediaPort 구현.
+//
+// 전화망에서 들어온 프레임은 onFrameReceived()에서 AI 쪽으로 가고,
+// AI가 만든 TTS는 onFrameRequested()에서 전화망 쪽으로 나간다.
+// 따라서 이 파일은 미디어 품질, VAD, barge-in, 수명주기 안정성의 중심이다.
 #include "VoicebotMediaPort.h"
 
 #include "../ai/SileroVad.h"
@@ -14,6 +19,8 @@
 #include <vector>
 
 namespace {
+// retire() 된 media port를 일정 시간 더 보관하는 grace pool.
+// PJSIP의 unregister가 비동기라서 객체를 즉시 파괴하면 use-after-free 위험이 있다.
 constexpr auto kRetiredMediaPortGracePeriod = std::chrono::seconds(45);
 
 std::mutex retired_ports_mutex;
@@ -70,6 +77,8 @@ VoicebotMediaPort::~VoicebotMediaPort()
 
 void VoicebotMediaPort::quiesce()
 {
+    // quiesce는 "더 이상 새 프레임을 처리하지 않겠다"는 선언이고,
+    // shutdown은 거기에 unregister 요청까지 포함한 더 강한 종료 단계다.
     shutting_down_.store(true, std::memory_order_release);
     ai_paused_.store(true, std::memory_order_release);
     {
@@ -134,6 +143,8 @@ void VoicebotMediaPort::setAiPaused(bool paused)
 
 void VoicebotMediaPort::onFrameReceived(pj::MediaFrame& frame)
 {
+    // 수신 경로:
+    // RTP -> SpeexDSP -> Silero VAD -> speech start/end edge -> AI sendAudio
     if (shutting_down_.load(std::memory_order_acquire) ||
         ai_paused_.load(std::memory_order_acquire)) {
         return;  // Bridge 상태 등 AI 개입 차단 모드
@@ -175,6 +186,8 @@ void VoicebotMediaPort::onFrameReceived(pj::MediaFrame& frame)
 
 void VoicebotMediaPort::onFrameRequested(pj::MediaFrame& frame)
 {
+    // 송신 경로는 가능한 만큼 TTS ring buffer를 읽고,
+    // 부족한 나머지는 silence로 채워 pop/click 같은 잡음을 줄인다.
     frame.type = PJMEDIA_FRAME_TYPE_AUDIO;
     if (shutting_down_.load(std::memory_order_acquire)) {
         if (frame.buf.size() > 0) {

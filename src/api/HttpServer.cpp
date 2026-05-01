@@ -1,3 +1,11 @@
+// 운영/제어용 HTTP 서버의 실제 구현.
+//
+// 이 파일은 세 층으로 읽으면 가장 이해가 쉽다.
+// 1. 상단 helper: 문자열/JSON/URI 검증
+// 2. middle server loop: accept, request parsing, route dispatch
+// 3. 하단 endpoint handlers: health/metrics/control API
+//
+// 콜 자체를 처리하지는 않고, SessionManager/VoicebotCall 쪽으로 안전하게 위임한다.
 #include "HttpServer.h"
 
 #include "../engine/SessionManager.h"
@@ -23,6 +31,8 @@
 using boost::asio::ip::tcp;
 
 namespace {
+// 이 네임스페이스의 함수들은 외부 API 표면을 늘리지 않으면서
+// 요청 파싱/검증용 로직을 이 파일 안에 지역화하기 위한 helper 집합이다.
 
 std::string trim(std::string s)
 {
@@ -404,6 +414,8 @@ void HttpServer::runServer(int port)
 // [A-1 Fix] 개별 연결 처리 — 워커 스레드에서 실행
 void HttpServer::handleConnectionImpl(void* socket_ptr)
 {
+    // 요청 1개를 끝까지 읽고, route dispatch 후 응답 1개를 쓰는 단순한 모델이다.
+    // 상태 저장형 keep-alive 서버가 아니라 관리용 짧은 요청/응답에 최적화되어 있다.
     auto* socket = static_cast<tcp::socket*>(socket_ptr);
     try {
         const auto& cfg = AppConfig::instance();
@@ -581,6 +593,8 @@ void HttpServer::handleConnectionImpl(void* socket_ptr)
 
 std::string HttpServer::handleHealthCheck() const
 {
+    // /health는 사람이 보기 쉬운 요약 JSON이다.
+    // readiness의 binary 결과보다 더 많은 운영 단서를 담는 것이 목표다.
     const auto& cfg = AppConfig::instance();
     auto& metrics = RuntimeMetrics::instance();
     const auto active_calls = SessionManager::getInstance().getActiveCallCount();
@@ -641,6 +655,8 @@ std::string HttpServer::handleReadiness() const
 
 std::string HttpServer::handleMetrics() const
 {
+    // /metrics는 Prometheus scrape를 위해 텍스트 포맷으로 노출한다.
+    // 값 자체는 대부분 RuntimeMetrics + 활성 콜 snapshot에서 계산한다.
     auto& metrics = RuntimeMetrics::instance();
     const auto active_calls = SessionManager::getInstance().getActiveCallCount();
     const auto media = collectAggregatedMediaStats();
@@ -741,6 +757,8 @@ std::string HttpServer::handleMetrics() const
 
 std::string HttpServer::handleListServices(const std::string& admin_key, const std::string& remote_ip) const
 {
+    // 서비스 목록은 routing config의 정적 정의와
+    // CapacityManager의 실시간 active count를 합쳐서 보여준다.
     const auto& cfg = AppConfig::instance();
     if (!constantTimeEquals(admin_key, cfg.admin_api_key)) {
         return makeHttpResponse(403, "Forbidden", "{\"error\":\"invalid_admin_key\"}", "application/json");
@@ -765,6 +783,8 @@ std::string HttpServer::handleListServices(const std::string& admin_key, const s
 
 std::string HttpServer::handleListSessions(const std::string& admin_key, const std::string& remote_ip) const
 {
+    // 세션 목록은 운영자가 "지금 어떤 콜이 살아 있는가"를 빠르게 보기 위한 endpoint다.
+    // SessionManager snapshot을 순회하며 call_id, session_id, route 정보를 묶어 반환한다.
     const auto& cfg = AppConfig::instance();
     if (!constantTimeEquals(admin_key, cfg.admin_api_key)) {
         return makeHttpResponse(403, "Forbidden", "{\"error\":\"invalid_admin_key\"}", "application/json");
@@ -794,6 +814,8 @@ std::string HttpServer::handleOutboundCall(const std::string& request_body,
                                            const std::string& admin_key,
                                            const std::string& remote_ip) const
 {
+    // outbound call API는 인증 -> 레이트리밋 -> URI 검증 -> 계정 선택 -> makeCall 순서다.
+    // 각 단계는 실패 이유를 서로 다른 metrics/log로 남겨 운영 추적이 가능하게 한다.
     const auto& cfg = AppConfig::instance();
     auto& metrics = RuntimeMetrics::instance();
     metrics.incAdminApiOutboundRequests();

@@ -1,3 +1,10 @@
+// 프로세스 내부 활성 통화와 zombie retention을 관리하는 구현.
+//
+// 이 파일의 포인트는 단순 map 관리가 아니라,
+// 1) 동시호 상한 검사
+// 2) stale PJSIP call slot 재사용 처리
+// 3) DISCONNECTED 직후 grace period(zombies_) 유지
+// 를 한곳에서 수행한다는 점이다.
 #include "SessionManager.h"
 #include "../utils/AppConfig.h"
 
@@ -24,6 +31,8 @@ SessionManager::SessionManager() : max_calls_(AppConfig::instance().max_concurre
 }
 
 std::vector<std::shared_ptr<VoicebotCall>> SessionManager::cleanupZombiesLocked() {
+    // PJSIP 쪽 비동기 콜백이 약간 늦게 도착할 수 있어 바로 delete하지 않고 잠시 보관한다.
+    // 이 grace period가 과거 use-after-free 계열 문제를 줄이는 데 중요하다.
     std::vector<std::shared_ptr<VoicebotCall>> to_delete;
     auto now = std::chrono::steady_clock::now();
     for (auto it = zombies_.begin(); it != zombies_.end(); ) {
@@ -55,6 +64,7 @@ void SessionManager::addCall(const std::string& session_id, std::shared_ptr<Voic
 }
 
 bool SessionManager::tryAddCall(const std::string& session_id, std::shared_ptr<VoicebotCall> call) {
+    // 분산 슬롯 확보와 별개로, 현재 프로세스가 감당할 로컬 상한을 여기서 한 번 더 본다.
     std::vector<std::shared_ptr<VoicebotCall>> to_delete;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -93,6 +103,8 @@ void SessionManager::removeCall(const std::string& session_id) {
 
 std::shared_ptr<VoicebotCall> SessionManager::takeCallByPjsipId(int pjsip_call_id,
                                                                 std::string* session_id) {
+    // PJSIP는 제한된 call slot을 재사용하므로, 이전 세션이 늦게 정리되면
+    // 같은 call_id를 가진 stale 객체가 남아 있을 수 있다. 이를 강제로 수거하는 경로다.
     std::shared_ptr<VoicebotCall> extracted;
     std::vector<std::shared_ptr<VoicebotCall>> to_delete;
 

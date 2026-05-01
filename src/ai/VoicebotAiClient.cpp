@@ -1,3 +1,11 @@
+// 통화 단위 gRPC 양방향 스트림의 실제 송수신/재연결 구현.
+//
+// 읽는 순서 추천:
+// 1. startSession()으로 스트림이 열리는 시점
+// 2. sendAudio()/sendDtmf()가 큐에 적재하는 방식
+// 3. streamWorker()가 쓰기를 수행하는 방식
+// 4. tryConnectAndRead()/readWorker()가 응답과 재연결을 처리하는 방식
+// 5. endSession()이 종료를 정리하는 방식
 #include "VoicebotAiClient.h"
 
 #include "../utils/AppConfig.h"
@@ -120,6 +128,7 @@ bool VoicebotAiClient::isPermanentFailureStatus(grpc::StatusCode code)
 
 void VoicebotAiClient::startSession(const std::string& session_id)
 {
+    // 세션 시작은 "중복 실행 방지 -> 초기 stream/context 생성 -> worker 기동" 순서로 진행된다.
     bool expected = false;
     if (!is_running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         spdlog::warn("[gRPC] startSession ignored because session is already running: {}",
@@ -167,6 +176,8 @@ void VoicebotAiClient::sendAudio(const std::vector<uint8_t>& pcm_data, bool is_s
 
 void VoicebotAiClient::sendAudio(const uint8_t* data, size_t len, bool is_speaking)
 {
+    // 미디어 콜백에서 네트워크 write를 직접 하지 않고 큐를 거치게 함으로써,
+    // PJSIP 오디오 경로가 gRPC 지연에 의해 막히지 않게 만든다.
     if (!is_running_.load(std::memory_order_acquire))
         return;
 
@@ -227,6 +238,8 @@ void VoicebotAiClient::sendDtmf(const std::string& digit)
 
 void VoicebotAiClient::streamWorker()
 {
+    // write worker는 오디오/DTMF 큐를 소모해 stream에 쓰기만 담당한다.
+    // 재연결 결정은 read worker 쪽으로 몰아 오류 처리 책임을 분리한다.
     vbgw::utils::PjThreadHelper::registerThread("streamWorker");
     while (is_running_.load(std::memory_order_acquire)) {
         AudioItem item;
@@ -285,6 +298,7 @@ void VoicebotAiClient::streamWorker()
 
 void VoicebotAiClient::endSession()
 {
+    // 종료 경로에서는 새 입력 차단, worker 깨우기, 안전한 join 순서가 가장 중요하다.
     is_running_.store(false, std::memory_order_release);
     queue_cv_.notify_all();
 
@@ -372,6 +386,8 @@ void VoicebotAiClient::endSession()
 
 VoicebotAiClient::ReadOutcome VoicebotAiClient::tryConnectAndRead()
 {
+    // read loop는 AI 응답을 상위 콜백으로 번역하고,
+    // 스트림 종료 이유를 "정상 종료 / 재연결 필요 / 영구 실패"로 분류한다.
     std::shared_ptr<Stream> local_stream;
     {
         std::lock_guard<std::mutex> lock(stream_mutex_);
@@ -426,6 +442,8 @@ VoicebotAiClient::ReadOutcome VoicebotAiClient::tryConnectAndRead()
 
 void VoicebotAiClient::readWorker()
 {
+    // read worker는 재연결 정책의 실제 집행자다.
+    // write 실패가 먼저 발생해도, stream 복구와 상태 전이는 여기서 수행한다.
     vbgw::utils::PjThreadHelper::registerThread("readWorker");
     while (is_running_.load(std::memory_order_acquire)) {
         ReadOutcome outcome = tryConnectAndRead();
