@@ -16,6 +16,39 @@ endif()
 find_package(PkgConfig REQUIRED)
 
 # PJSIP 찾기
+set(PJPROJECT_ROOT "" CACHE PATH
+    "Custom PJPROJECT install prefix containing lib/pkgconfig/libpjproject.pc")
+set(PJPROJECT_PKGCONFIG_DIR "" CACHE PATH
+    "Optional explicit pkg-config directory for libpjproject.pc")
+
+set(_DEFAULT_LOCAL_PJPROJECT_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pjproject/install")
+if(NOT PJPROJECT_ROOT AND EXISTS
+   "${_DEFAULT_LOCAL_PJPROJECT_ROOT}/lib/pkgconfig/libpjproject.pc")
+    set(PJPROJECT_ROOT "${_DEFAULT_LOCAL_PJPROJECT_ROOT}" CACHE PATH
+        "Custom PJPROJECT install prefix containing lib/pkgconfig/libpjproject.pc" FORCE)
+endif()
+
+if(NOT PJPROJECT_PKGCONFIG_DIR AND PJPROJECT_ROOT)
+    set(PJPROJECT_PKGCONFIG_DIR "${PJPROJECT_ROOT}/lib/pkgconfig" CACHE PATH
+        "Optional explicit pkg-config directory for libpjproject.pc" FORCE)
+endif()
+
+if(PJPROJECT_PKGCONFIG_DIR)
+    if(DEFINED ENV{PKG_CONFIG_PATH} AND NOT "$ENV{PKG_CONFIG_PATH}" STREQUAL "")
+        set(ENV{PKG_CONFIG_PATH}
+            "${PJPROJECT_PKGCONFIG_DIR}:$ENV{PKG_CONFIG_PATH}")
+    else()
+        set(ENV{PKG_CONFIG_PATH} "${PJPROJECT_PKGCONFIG_DIR}")
+    endif()
+
+    if(PJPROJECT_ROOT)
+        list(PREPEND CMAKE_PREFIX_PATH "${PJPROJECT_ROOT}")
+        message(STATUS "Using custom PJPROJECT_ROOT: ${PJPROJECT_ROOT}")
+    endif()
+    message(STATUS "Using PJPROJECT pkg-config path: ${PJPROJECT_PKGCONFIG_DIR}")
+endif()
+
 pkg_check_modules(PJPROJECT REQUIRED libpjproject)
 
 # Monitoring dependencies

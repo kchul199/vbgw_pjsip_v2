@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 import struct
 import time
 from concurrent import futures
@@ -92,23 +93,26 @@ def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=200))
     voicebot_pb2_grpc.add_VoicebotAiServiceServicer_to_server(VoicebotAiServiceServicer(), server)
 
+    bind_target = os.getenv("MOCK_SERVER_ADDR", "127.0.0.1:50051")
+
     # IPv6 bind 실패 환경(샌드박스/CI) 대응: IPv4 loopback으로 폴백
     bind_port = 0
     bind_addr = ""
-    try:
-        bind_port = server.add_insecure_port("[::]:50051")
-        bind_addr = "[::]:50051"
-    except Exception as e:
-        logging.warning("IPv6 bind failed for mock server: %s", e)
+    bind_candidates = [bind_target]
+    if bind_target != "127.0.0.1:50051":
+        bind_candidates.append("127.0.0.1:50051")
+
+    for candidate in bind_candidates:
+        try:
+            bind_port = server.add_insecure_port(candidate)
+            bind_addr = candidate
+        except Exception as e:
+            logging.warning("Bind failed for mock server %s: %s", candidate, e)
+        if bind_port != 0:
+            break
 
     if bind_port == 0:
-        try:
-            bind_port = server.add_insecure_port("127.0.0.1:50051")
-            bind_addr = "127.0.0.1:50051"
-        except Exception as e:
-            logging.warning("IPv4 bind failed for mock server: %s", e)
-    if bind_port == 0:
-        raise RuntimeError("Failed to bind gRPC mock server to 50051 on IPv6/IPv4")
+        raise RuntimeError(f"Failed to bind gRPC mock server on {bind_candidates}")
 
     server.start()
     logging.info("🚀 Python STT/TTS Emulator running on %s...", bind_addr)

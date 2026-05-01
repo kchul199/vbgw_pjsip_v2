@@ -272,10 +272,9 @@ void VoicebotAiClient::streamWorker()
                 RuntimeMetrics::instance().incGrpcStreamErrors();
                 RuntimeMetrics::instance().markGrpcUnhealthy();
                 std::lock_guard<std::mutex> lock(stream_mutex_);
-                if (context_)
+                if (context_) {
                     context_->TryCancel();
-            }
-            if (!local_stream->Write(chunk)) {
+                }
                 // Stream is broken. readWorker will reconnect. We sleep to avoid tight loop.
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }

@@ -2,20 +2,40 @@
 #include <spdlog/spdlog.h>
 #include <uuid/uuid.h> // 고유 slot_id 생성을 위해 uuid 사용 (시스템 라이브러리)
 
+#include <chrono>
+
+namespace {
+
+constexpr long long kLeaseTtlSeconds = 30;
+
+long long leaseNowSeconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+}
+
 // Lua Script: Max Concurrent 체크 후 슬롯 할당 및 TTL 설정
-// KEYS[1]: vbgw:slots:{service_name} (SET)
+// KEYS[1]: vbgw:slots:{service_name} (ZSET, member=slot_id, score=expires_at_epoch_sec)
 // KEYS[2]: vbgw:lease:{slot_id} (STRING)
 // ARGV[1]: slot_id
 // ARGV[2]: max_concurrent
-// ARGV[3]: ttl_seconds
+// ARGV[3]: now_epoch_sec
+// ARGV[4]: ttl_seconds
+// ARGV[5]: service_name
 const std::string LEASE_LUA = R"(
-    local count = redis.call('SCARD', KEYS[1])
+    local now_sec = tonumber(ARGV[3])
+    local ttl_sec = tonumber(ARGV[4])
+    local expires_at = now_sec + ttl_sec
+    redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_sec)
+    local count = redis.call('ZCARD', KEYS[1])
     local max_cap = tonumber(ARGV[2])
     if max_cap > 0 and count >= max_cap then
         return 0
     end
-    redis.call('SADD', KEYS[1], ARGV[1])
-    redis.call('SETEX', KEYS[2], ARGV[3], ARGV[1])
+    redis.call('ZADD', KEYS[1], expires_at, ARGV[1])
+    redis.call('SETEX', KEYS[2], ttl_sec, ARGV[5])
     return 1
 )";
 
@@ -55,9 +75,12 @@ SlotLease CapacityManager::leaseSlot(const std::string& service_name, int max_co
     std::string lease_key = "vbgw:lease:" + slot_id;
 
     try {
+        const auto now_sec = leaseNowSeconds();
         auto result = redis_->command<long long>(
             "EVAL", LEASE_LUA, 2, slots_key.c_str(), lease_key.c_str(),
-            slot_id.c_str(), std::to_string(max_concurrent).c_str(), "30");
+            slot_id.c_str(), std::to_string(max_concurrent).c_str(),
+            std::to_string(now_sec).c_str(), std::to_string(kLeaseTtlSeconds).c_str(),
+            service_name.c_str());
 
         if (result == 1) {
             spdlog::info("[CapacityManager] Leased slot {} for service {}", slot_id, service_name);
@@ -80,7 +103,7 @@ void CapacityManager::releaseSlot(const std::string& service_name, const std::st
         std::string lease_key = "vbgw:lease:" + slot_id;
 
         auto pipeline = redis_->pipeline();
-        pipeline.srem(slots_key, slot_id)
+        pipeline.zrem(slots_key, slot_id)
                 .del(lease_key)
                 .exec();
 
@@ -95,7 +118,19 @@ void CapacityManager::refreshLease(const std::string& slot_id) {
 
     try {
         std::string lease_key = "vbgw:lease:" + slot_id;
-        redis_->expire(lease_key, 30);
+        auto service_name = redis_->get(lease_key);
+        if (!service_name) {
+            return;
+        }
+
+        std::string slots_key = "vbgw:slots:" + *service_name;
+        const auto now_sec = leaseNowSeconds();
+        const auto expires_at = now_sec + kLeaseTtlSeconds;
+
+        auto pipeline = redis_->pipeline();
+        pipeline.expire(lease_key, kLeaseTtlSeconds)
+                .zadd(slots_key, slot_id, expires_at)
+                .exec();
     } catch (...) {
         // Heartbeat 실패는 로그만 남김
     }
@@ -104,7 +139,11 @@ void CapacityManager::refreshLease(const std::string& slot_id) {
 int CapacityManager::getActiveCount(const std::string& service_name) {
     if (!redis_) return 0;
     try {
-        return static_cast<int>(redis_->scard("vbgw:slots:" + service_name));
+        const std::string slots_key = "vbgw:slots:" + service_name;
+        const auto now_sec = leaseNowSeconds();
+        redis_->command<long long>("ZREMRANGEBYSCORE", slots_key.c_str(), "-inf",
+                                   std::to_string(now_sec).c_str());
+        return static_cast<int>(redis_->zcard(slots_key));
     } catch (...) {
         return 0;
     }
